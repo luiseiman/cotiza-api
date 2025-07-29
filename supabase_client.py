@@ -10,7 +10,6 @@ key = os.getenv("SUPABASE_KEY")
 supabase = create_client(url, key)
 
 def parsear_cotizacion(data):
-    # Si es string, convertir a dict
     if isinstance(data, str):
         try:
             data = json.loads(data)
@@ -78,13 +77,10 @@ def parsear_cotizacion(data):
         "raw": data
     }
 
-
 def guardar_en_supabase(data):
     registro = parsear_cotizacion(data)
-    print("🟢 Registro a guardar:", registro)
     if not registro:
         print("❌ Registro no válido, no se guarda.")
         return
     supabase.table("cotizaciones_historicas").insert(registro).execute()
     supabase.table("ultima_cotizacion").upsert(registro, on_conflict=["symbol"]).execute()
-

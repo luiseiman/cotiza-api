@@ -1,9 +1,9 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
-from ws_rofex import MarketDataManager
+from ws_rofex import MarketDataManager, broadcaster
 
 app = FastAPI()
-manager = MarketDataManager()
+manager = MarketDataManager()  # Control clásico REST
 
 class RequestBody(BaseModel):
     instrumentos: list[str]
@@ -31,3 +31,12 @@ async def estado():
         return {"estado": "iniciada"}
     return {"estado": "parada"}
 
+# --- Nuevo endpoint websocket ---
+@app.websocket("/ws-cotizaciones")
+async def ws_cotizaciones(websocket: WebSocket):
+    await broadcaster.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()  # Opcional: puede recibir pings, ignoramos
+    except WebSocketDisconnect:
+        broadcaster.disconnect(websocket)
