@@ -81,7 +81,7 @@ class MarketDataManager:
                 print("🔴 Mensaje no es dict tras decodificar:", type(message))
                 return
 
-            guardar_en_supabase(message)
+            #guardar_en_supabase(message)
             broadcaster.enqueue(message)
             print("Market Data Message Saved y enviado a WebSockets:", message)
 
