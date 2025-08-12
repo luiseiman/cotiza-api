@@ -61,7 +61,7 @@ def _warmup_pair(base_symbol: str, quote_symbol: str):
     mid_hist: Deque[float] = deque(maxlen=180)
 
     try:
-        # Nota: tu wrapper permite pasar filtros como params: eq.<valor>, order, limit.
+        # Filtros estilo PostgREST (eq.<valor>)
         res = supabase.table("terminal_ratios_history").select(
             "bid_ratio,ask_ratio,mid_ratio,asof",
             base_symbol=f"eq.{base_symbol}",
@@ -137,7 +137,10 @@ def _compute_ratios(base_cache: dict, quote_cache: dict):
 
     return bid_ratio, ask_ratio, mid_ratio, b_bid, b_ask, q_bid, q_ask
 
-def _append_and_metrics(key: Tuple[str, str], bid_ratio: Optional[float], ask_ratio: Optional[float], mid_ratio: Optional[float]):
+def _append_and_metrics(key: Tuple[str, str],
+                        bid_ratio: Optional[float],
+                        ask_ratio: Optional[float],
+                        mid_ratio: Optional[float]):
     """Actualiza deques y calcula métricas derivadas."""
     H = _hist[key]
     bid_hist: Deque[float] = H["bid_hist"]
@@ -165,8 +168,8 @@ def _append_and_metrics(key: Tuple[str, str], bid_ratio: Optional[float], ask_ra
     bb180_ask_upper, bb180_ask_lower = _bollinger(sma180_ask, std180_ask)
     bb180_mid_upper, bb180_mid_lower = _bollinger(sma180_mid, std180_mid)
 
-    # Std 60 para mid
-    std60_mid = _std(list(mid_hist)[-60:]) if len(mid_hist) >= 2 else None
+    # Std 60 para mid (usa últimos 60 si existen)
+    std60_mid = _std(list(mid_hist)[-60:]) if len(mid_hist) >= 60 else None
 
     # Z-scores usando std180_mid (consistente con columnas que tenés)
     z_bid = ((bid_ratio - sma180_bid) / std180_mid) if (bid_ratio is not None and sma180_bid is not None and std180_mid not in (None, 0)) else None
@@ -174,7 +177,11 @@ def _append_and_metrics(key: Tuple[str, str], bid_ratio: Optional[float], ask_ra
 
     # Otros
     ratio_spread = (ask_ratio - bid_ratio) if (ask_ratio is not None and bid_ratio is not None) else None
-    vol_ratio = None  # no tenemos volúmenes en quotes_cache (podés completar más adelante)
+
+    # >>> Volatilidad relativa: std60_mid / std180_mid
+    vol_ratio = None
+    if std60_mid is not None and std180_mid not in (None, 0):
+        vol_ratio = float(std60_mid) / float(std180_mid)
 
     return {
         "sma180_bid": sma180_bid,
@@ -189,7 +196,7 @@ def _append_and_metrics(key: Tuple[str, str], bid_ratio: Optional[float], ask_ra
         "z_bid": z_bid,
         "z_ask": z_ask,
         "ratio_spread": ratio_spread,
-        "vol_ratio": vol_ratio,
+        "vol_ratio": vol_ratio,               # ← ahora calculado
         "bb180_mid_upper": bb180_mid_upper,
         "bb180_mid_lower": bb180_mid_lower,
     }
@@ -246,6 +253,12 @@ def periodic_ratios_job():
 
                 metrics = _append_and_metrics(key, bid_ratio, ask_ratio, mid_ratio)
 
+                # (Opcional) log del vol_ratio
+                if metrics["vol_ratio"] is not None:
+                    print(f"{PRINT_PREFIX} vol_ratio={metrics['vol_ratio']:.6f} "
+                          f"(std60={metrics['std60_mid']}, std180={metrics['std180_mid']}) "
+                          f"para {base_symbol} / {quote_symbol}")
+
                 row = {
                     "user_id": user_id,
                     "client_id": client_id,
@@ -271,7 +284,7 @@ def periodic_ratios_job():
                     "z_bid": metrics["z_bid"],
                     "z_ask": metrics["z_ask"],
                     "ratio_spread": metrics["ratio_spread"],
-                    "vol_ratio": metrics["vol_ratio"],
+                    "vol_ratio": metrics["vol_ratio"],              # ← se inserta
                     "bb180_mid_upper": metrics["bb180_mid_upper"],
                     "bb180_mid_lower": metrics["bb180_mid_lower"],
                 }
