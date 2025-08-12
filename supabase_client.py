@@ -1,86 +1,135 @@
-from supabase import create_client
+# supabase_client.py
 import os
-from dotenv import load_dotenv
-import datetime
 import json
+import datetime
+from typing import Any, Dict, List, Optional, Union
+from urllib.parse import urlencode
+from dotenv import load_dotenv
+import requests
 
 load_dotenv()
-url = os.getenv("SUPABASE_URL")
-key = os.getenv("SUPABASE_KEY")
-supabase = create_client(url, key)
 
-def parsear_cotizacion(data):
-    if isinstance(data, str):
-        try:
-            data = json.loads(data)
-        except Exception as e:
-            print("❌ No se pudo decodificar el mensaje en parsear_cotizacion:", e)
-            return None
+URL = os.getenv("SUPABASE_URL")
+KEY = os.getenv("SUPABASE_KEY")
 
-    symbol = None
-    ts = None
-    bid_price = bid_size = offer_price = offer_size = last_price = last_size = None
+if not URL or not KEY:
+    raise RuntimeError("Faltan SUPABASE_URL o SUPABASE_KEY en el .env")
 
-    try:
-        symbol = data["instrumentId"]["symbol"]
-        ts_raw = data.get("timestamp", None)
-        if ts_raw:
-            ts = datetime.datetime.utcfromtimestamp(ts_raw/1000).isoformat()
-        else:
-            ts = datetime.datetime.utcnow().isoformat()
+BASE = f"{URL.rstrip('/')}/rest/v1"
 
-        md = data.get("marketData", {})
+BASE_HEADERS = {
+    "apikey": KEY,
+    "Authorization": f"Bearer {KEY}",
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+}
 
-        # BI puede ser lista o dict o None
-        bi = md.get("BI")
-        if isinstance(bi, list) and len(bi) > 0:
-            bid = bi[0]
-        elif isinstance(bi, dict):
-            bid = bi
-        else:
-            bid = {}
+# ---------------- Mini cliente compatible con supabase.table(...).X().execute() ----------------
+class _Exec:
+    def __init__(self, fn):
+        self._fn = fn
 
-        # OF puede ser lista o dict o None
-        of = md.get("OF")
-        if isinstance(of, list) and len(of) > 0:
-            offer = of[0]
-        elif isinstance(of, dict):
-            offer = of
-        else:
-            offer = {}
+    def execute(self):
+        class _R:
+            def __init__(self, data):
+                self.data = data
+        return _R(self._fn())
 
-        # LA puede ser dict o None
-        la = md.get("LA")
-        if isinstance(la, dict):
-            last = la
-        else:
-            last = {}
+class _TableWrapper:
+    def __init__(self, name: str):
+        self._name = name
 
-        bid_price = bid.get("price")
-        bid_size = bid.get("size")
-        offer_price = offer.get("price")
-        offer_size = offer.get("size")
-        last_price = last.get("price")
-        last_size = last.get("size")
-    except Exception as e:
-        print("❌ Error al parsear campos:", e)
+    def select(self, query: str = "*"):
+        def _run():
+            params = {"select": query}
+            resp = requests.get(
+                f"{BASE}/{self._name}",
+                headers=BASE_HEADERS,
+                params=params,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        return _Exec(_run)
 
-    return {
-        "symbol": symbol,
-        "timestamp": ts,
-        "bid_price": bid_price,
-        "bid_size": bid_size,
-        "offer_price": offer_price,
-        "offer_size": offer_size,
-        "last_price": last_price,
-        "last_size": last_size,
-        "raw": data
+    def insert(self, rows: Union[Dict[str, Any], List[Dict[str, Any]]]):
+        def _run():
+            headers = {**BASE_HEADERS, "Prefer": "return=representation"}
+            resp = requests.post(
+                f"{BASE}/{self._name}",
+                headers=headers,
+                data=json.dumps(rows),
+                timeout=30,
+            )
+            resp.raise_for_status()
+            # Puede devolver lista de filas insertadas
+            return resp.json() if resp.text else []
+        return _Exec(_run)
+
+    def upsert(
+        self,
+        rows: Union[Dict[str, Any], List[Dict[str, Any]]],
+        on_conflict: Optional[Union[str, List[str]]] = None,
+    ):
+        def _run():
+            headers = {**BASE_HEADERS, "Prefer": "resolution=merge-duplicates,return=representation"}
+            params = {}
+            if on_conflict:
+                if isinstance(on_conflict, (list, tuple)):
+                    on_conflict_val = ",".join(on_conflict)
+                else:
+                    on_conflict_val = str(on_conflict)
+                params["on_conflict"] = on_conflict_val
+
+            resp = requests.post(
+                f"{BASE}/{self._name}",
+                headers=headers,
+                params=params,
+                data=json.dumps(rows),
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json() if resp.text else []
+        return _Exec(_run)
+
+class _CompatClient:
+    def table(self, name: str):
+        return _TableWrapper(name)
+
+# Objeto “supabase” compatible con el resto del proyecto
+supabase = _CompatClient()
+
+# ---------------- Helper que ya usabas para guardar ticks ----------------
+def guardar_en_supabase(data: dict):
+    """
+    Guarda ticks en:
+      - cotizaciones_historicas (insert)
+      - ultima_cotizacion (upsert por symbol)
+
+    data espera keys:
+      symbol, timestamp(ms o iso), bid_price, bid_size, offer_price, offer_size, last_price, last_size, raw
+    """
+    ts = data.get("timestamp")
+    if isinstance(ts, (int, float)):
+        ts_iso = datetime.datetime.utcfromtimestamp(ts / 1000).isoformat()
+    elif isinstance(ts, str):
+        ts_iso = ts
+    else:
+        ts_iso = datetime.datetime.utcnow().isoformat()
+
+    row = {
+        "symbol": data.get("symbol"),
+        "timestamp": ts_iso,
+        "bid_price": data.get("bid_price"),
+        "bid_size": data.get("bid_size"),
+        "offer_price": data.get("offer_price"),
+        "offer_size": data.get("offer_size"),
+        "last_price": data.get("last_price"),
+        "last_size": data.get("last_size"),
+        "raw": data.get("raw"),
     }
 
-def guardar_en_supabase(data):
-    registro = parsear_cotizacion(data)
-    if not registro:
-        print("❌ Registro no válido, no se guarda.")
-        return
-    supabase.table("cotizaciones_historicas").insert(registro).execute()
-    supabase.table("ultima_cotizacion").upsert(registro, on_conflict=["symbol"]).execute()
+    # Insert histórico
+    supabase.table("cotizaciones_historicas").insert(row).execute()
+    # Upsert última por symbol
+    supabase.table("ultima_cotizacion").upsert(row, on_conflict="symbol").execute()
