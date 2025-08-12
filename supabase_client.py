@@ -3,7 +3,6 @@ import os
 import json
 import datetime
 from typing import Any, Dict, List, Optional, Union
-from urllib.parse import urlencode
 from dotenv import load_dotenv
 import requests
 
@@ -39,9 +38,18 @@ class _TableWrapper:
     def __init__(self, name: str):
         self._name = name
 
-    def select(self, query: str = "*"):
+    def select(self, query: str = "*", **filters):
+        """
+        Permite filtros estilo:
+          select("col1,col2", base_symbol="eq.ABC", order="asof.desc", limit="180")
+        Cualquier par k=v en **filters se agrega a los params de la URL.
+        """
         def _run():
             params = {"select": query}
+            for k, v in (filters or {}).items():
+                if v is None:
+                    continue
+                params[k] = v
             resp = requests.get(
                 f"{BASE}/{self._name}",
                 headers=BASE_HEADERS,
@@ -62,7 +70,6 @@ class _TableWrapper:
                 timeout=30,
             )
             resp.raise_for_status()
-            # Puede devolver lista de filas insertadas
             return resp.json() if resp.text else []
         return _Exec(_run)
 
@@ -99,7 +106,7 @@ class _CompatClient:
 # Objeto “supabase” compatible con el resto del proyecto
 supabase = _CompatClient()
 
-# ---------------- Helper que ya usabas para guardar ticks ----------------
+# ---------------- Helper para guardar ticks (si lo volvés a usar) ----------------
 def guardar_en_supabase(data: dict):
     """
     Guarda ticks en:
@@ -129,7 +136,5 @@ def guardar_en_supabase(data: dict):
         "raw": data.get("raw"),
     }
 
-    # Insert histórico
     supabase.table("cotizaciones_historicas").insert(row).execute()
-    # Upsert última por symbol
     supabase.table("ultima_cotizacion").upsert(row, on_conflict="symbol").execute()
