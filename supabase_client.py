@@ -1,140 +1,159 @@
-# supabase_client.py
 import os
-import json
-import datetime
-from typing import Any, Dict, List, Optional, Union
 from dotenv import load_dotenv
-import requests
+from supabase import create_client, Client
 
+# Cargar .env
 load_dotenv()
 
-URL = os.getenv("SUPABASE_URL")
-KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+# Aceptar múltiples nombres de clave: service role > key > anon
+SUPABASE_KEY = (
+    os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+    or os.getenv("SUPABASE_KEY")
+    or os.getenv("SUPABASE_ANON_KEY")
+)
 
-if not URL or not KEY:
-    raise RuntimeError("Faltan SUPABASE_URL o SUPABASE_KEY en el .env")
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise RuntimeError("[supabase] FALTAN SUPABASE_URL / SUPABASE_KEY en .env. No se puede iniciar sin DB.")
 
-BASE = f"{URL.rstrip('/')}/rest/v1"
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-BASE_HEADERS = {
-    "apikey": KEY,
-    "Authorization": f"Bearer {KEY}",
-    "Content-Type": "application/json",
-    "Accept": "application/json",
-}
 
-# ---------------- Mini cliente compatible con supabase.table(...).X().execute() ----------------
-class _Exec:
-    def __init__(self, fn):
-        self._fn = fn
+def get_active_pairs(user_id: str = None):
+    """Trae los pares activos desde la tabla terminal_ratio_pairs.
+    
+    Args:
+        user_id: Parámetro ignorado (mantenido por compatibilidad).
+                 Los pares se obtienen de la tabla sin filtrar.
+    
+    Returns:
+        Lista de todos los pares activos de la tabla.
+    """
+    try:
+        # Obtener todos los pares de la tabla terminal_ratio_pairs
+        # El user_id real viene de cada registro en la tabla
+        query = supabase.table("terminal_ratio_pairs").select("*")
+        
+        # Intentar filtrar por active si existe la columna
+        try:
+            data = query.eq("active", True).execute()
+        except Exception:
+            # Si no existe la columna active, traer todos
+            data = query.execute()
+        
+        pairs = data.data or []
+        print(f"[supabase] Obtenidos {len(pairs)} pares de terminal_ratio_pairs")
+        
+        return pairs
+        
+    except Exception as e:
+        print(f"[supabase] error get_active_pairs: {e}")
+        # En caso de error, intentar obtener todos los pares sin filtros
+        try:
+            data = supabase.table("terminal_ratio_pairs").select("*").execute()
+            pairs = data.data or []
+            print(f"[supabase] Recuperación: obtenidos {len(pairs)} pares sin filtros")
+            return pairs
+        except Exception as e2:
+            print(f"[supabase] error en recuperación: {e2}")
+            return []
 
-    def execute(self):
-        class _R:
-            def __init__(self, data):
-                self.data = data
-        return _R(self._fn())
 
-class _TableWrapper:
-    def __init__(self, name: str):
-        self._name = name
+def list_rules(user_id: str, client_id: str = None, active: bool = True):
+    """Lista reglas de trading. client_id es opcional."""
+    try:
+        query = supabase.table("trading_rules").select("*")
+        if user_id:
+            query = query.eq("user_id", user_id)
+        if client_id:
+            query = query.eq("client_id", client_id)
+        if active:
+            query = query.eq("active", True)
+        data = query.execute()
+        return data.data or []
+    except Exception as e:
+        print(f"[supabase] error list_rules: {e}")
+        return []
 
-    def select(self, query: str = "*", **filters):
-        """
-        Permite filtros estilo:
-          select("col1,col2", base_symbol="eq.ABC", order="asof.desc", limit="180")
-        Cualquier par k=v en **filters se agrega a los params de la URL.
-        """
-        def _run():
-            params = {"select": query}
-            for k, v in (filters or {}).items():
-                if v is None:
-                    continue
-                params[k] = v
-            resp = requests.get(
-                f"{BASE}/{self._name}",
-                headers=BASE_HEADERS,
-                params=params,
-                timeout=30,
-            )
-            resp.raise_for_status()
-            return resp.json()
-        return _Exec(_run)
 
-    def insert(self, rows: Union[Dict[str, Any], List[Dict[str, Any]]]):
-        def _run():
-            headers = {**BASE_HEADERS, "Prefer": "return=representation"}
-            resp = requests.post(
-                f"{BASE}/{self._name}",
-                headers=headers,
-                data=json.dumps(rows),
-                timeout=30,
-            )
-            resp.raise_for_status()
-            return resp.json() if resp.text else []
-        return _Exec(_run)
+def create_rule(rule: dict):
+    try:
+        return supabase.table("trading_rules").insert(rule).execute()
+    except Exception as e:
+        print(f"[supabase] error create_rule: {e}")
+        return None
 
-    def upsert(
-        self,
-        rows: Union[Dict[str, Any], List[Dict[str, Any]]],
-        on_conflict: Optional[Union[str, List[str]]] = None,
-    ):
-        def _run():
-            headers = {**BASE_HEADERS, "Prefer": "resolution=merge-duplicates,return=representation"}
-            params = {}
-            if on_conflict:
-                if isinstance(on_conflict, (list, tuple)):
-                    on_conflict_val = ",".join(on_conflict)
+
+def delete_rule(rule_id: int):
+    try:
+        return supabase.table("trading_rules").delete().eq("id", rule_id).execute()
+    except Exception as e:
+        print(f"[supabase] error delete_rule: {e}")
+        return None
+
+
+def get_last_ratio_data(base_symbol: str, quote_symbol: str, user_id: str = None):
+    """Obtiene el último registro de ratios para reutilizar valores calculados."""
+    try:
+        query = supabase.table("terminal_ratios_history").select("*")
+        query = query.eq("base_symbol", base_symbol)
+        query = query.eq("quote_symbol", quote_symbol)
+        if user_id:
+            query = query.eq("user_id", user_id)
+        
+        # Ordenar por asof descendente y tomar el primero
+        data = query.order("asof", desc=True).limit(1).execute()
+        
+        if data.data and len(data.data) > 0:
+            last_record = data.data[0]
+            print(f"[supabase] 📊 Último registro encontrado para {base_symbol}/{quote_symbol}, ID: {last_record.get('id')}")
+            return last_record
+        else:
+            print(f"[supabase] ⚠️ No hay registros históricos para {base_symbol}/{quote_symbol}")
+            return None
+            
+    except Exception as e:
+        print(f"[supabase] error get_last_ratio_data: {e}")
+        return None
+
+
+def guardar_en_supabase(tabla: str, row: dict):
+    """Función de compatibilidad para guardar datos en Supabase."""
+    try:
+        # Verificar que la tabla existe antes de intentar insertar
+        if not tabla or not row:
+            return None
+            
+        # Limpiar datos antes de insertar
+        clean_row = {}
+        for key, value in row.items():
+            if value is not None:
+                if isinstance(value, float):
+                    if not (value == float('inf') or value == float('-inf')):
+                        clean_row[key] = value
                 else:
-                    on_conflict_val = str(on_conflict)
-                params["on_conflict"] = on_conflict_val
-
-            resp = requests.post(
-                f"{BASE}/{self._name}",
-                headers=headers,
-                params=params,
-                data=json.dumps(rows),
-                timeout=30,
-            )
-            resp.raise_for_status()
-            return resp.json() if resp.text else []
-        return _Exec(_run)
-
-class _CompatClient:
-    def table(self, name: str):
-        return _TableWrapper(name)
-
-# Objeto “supabase” compatible con el resto del proyecto
-supabase = _CompatClient()
-
-# ---------------- Helper para guardar ticks (si lo volvés a usar) ----------------
-def guardar_en_supabase(data: dict):
-    """
-    Guarda ticks en:
-      - cotizaciones_historicas (insert)
-      - ultima_cotizacion (upsert por symbol)
-
-    data espera keys:
-      symbol, timestamp(ms o iso), bid_price, bid_size, offer_price, offer_size, last_price, last_size, raw
-    """
-    ts = data.get("timestamp")
-    if isinstance(ts, (int, float)):
-        ts_iso = datetime.datetime.utcfromtimestamp(ts / 1000).isoformat()
-    elif isinstance(ts, str):
-        ts_iso = ts
-    else:
-        ts_iso = datetime.datetime.utcnow().isoformat()
-
-    row = {
-        "symbol": data.get("symbol"),
-        "timestamp": ts_iso,
-        "bid_price": data.get("bid_price"),
-        "bid_size": data.get("bid_size"),
-        "offer_price": data.get("offer_price"),
-        "offer_size": data.get("offer_size"),
-        "last_price": data.get("last_price"),
-        "last_size": data.get("last_size"),
-        "raw": data.get("raw"),
-    }
-
-    supabase.table("cotizaciones_historicas").insert(row).execute()
-    supabase.table("ultima_cotizacion").upsert(row, on_conflict="symbol").execute()
+                    clean_row[key] = value
+        
+        if not clean_row:
+            return None
+            
+        print(f"[supabase] Intentando insertar en {tabla}: {clean_row}")
+        resp = supabase.table(tabla).insert(clean_row).execute()
+        
+        # Verificar si la inserción fue exitosa basándose en los datos retornados
+        if hasattr(resp, 'data') and resp.data:
+            # Si hay datos retornados con ID, la inserción fue exitosa
+            inserted_data = resp.data
+            if isinstance(inserted_data, list) and len(inserted_data) > 0:
+                first_record = inserted_data[0]
+                if 'id' in first_record and first_record['id'] is not None:
+                    print(f"[supabase] ✅ Inserción exitosa en {tabla}, ID: {first_record['id']}")
+                    return resp
+        
+        # Si no se pudo verificar el éxito, asumir que falló
+        print(f"[supabase] ❌ No se pudo verificar el éxito de la inserción en {tabla}")
+        return None
+        
+    except Exception as e:
+        print(f"[supabase] error guardar_en_supabase en {tabla}: {e}")
+        return None

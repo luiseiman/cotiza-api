@@ -1,4 +1,7 @@
-# telegram_control.py - Version final funcional
+#!/usr/bin/env python3
+# Script temporal para crear telegram_control.py
+
+content = '''# telegram_control.py - Version final funcional
 import os
 import json
 import threading
@@ -309,3 +312,11 @@ def notify(text):
             _bot.send_message(int(ADMIN_CHAT_ID), text)
         except:
             pass
+'''
+
+# Escribir el archivo
+with open('telegram_control.py', 'w', encoding='utf-8') as f:
+    f.write(content)
+
+print("✅ Archivo telegram_control.py creado exitosamente")
+print(f"📏 Tamaño: {len(content)} bytes")

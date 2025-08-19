@@ -1,249 +1,250 @@
-# ===========================
-# Archivo: ws_rofex.py
-# - Sin Telegram acá (el bot va en telegram_control.py)
-# - Health (last_marketdata_at)
-# - Broadcaster WebSocket
-# - Actualiza quotes_cache
-# - Guardado opcional en Supabase (si supabase_client está presente)
-# ===========================
-import json
+from __future__ import annotations
 import time
-import asyncio
 import threading
-import os
+from typing import Any, Dict, Iterable, Optional, Tuple
 
-import pyRofex
-from quotes_cache import quotes_cache  # dict global: {symbol: {...}}
-
-# --- Guardado opcional en Supabase ---
-_GUARDAR_TICKS = True  # poné False si no querés persistir
-_guardar_func = None
 try:
-    from supabase_client import guardar_en_supabase as _guardar_func
+    from quotes_cache import quotes_cache
+except ImportError:
+    quotes_cache = {}
+
+try:
+    from params_store import set_last_params
+except ImportError:
+    def set_last_params(params): pass
+
+PRINT_PREFIX = "[ws_rofex]"
+
+class SimpleBroadcaster:
+    def __init__(self) -> None:
+        self._subscribers = []
+        self._lock = threading.Lock()
+
+    async def subscribe(self):
+        import asyncio
+        q = asyncio.Queue()
+        with self._lock:
+            self._subscribers.append(q)
+        return q
+
+    async def publish(self, message: Dict[str, Any]):
+        with self._lock:
+            subs = list(self._subscribers)
+        for q in subs:
+            try:
+                q.put_nowait(message)
+            except Exception:
+                pass
+
+    def subscribers(self) -> int:
+        with self._lock:
+            return len(self._subscribers)
+
+
+broadcaster = SimpleBroadcaster()
+
+_guardar_tick = None
+try:
+    from supabase_client import guardar_en_supabase as _guardar_tick
 except Exception:
-    _guardar_func = None
-    print("[ws_rofex] supabase_client.guardar_en_supabase no disponible; no se guardarán ticks en DB.")
+    print(f"{PRINT_PREFIX} supabase_client.guardar_en_supabase no disponible; no se guardarán ticks en DB.")
 
-# -------- Health: último tick recibido --------
-last_marketdata_at = 0  # epoch seconds
+def _first_price_and_size(levels: Any) -> Tuple[Optional[float], Optional[float]]:
+    if not levels:
+        return None, None
+    if isinstance(levels, dict):
+        price = levels.get("price") or levels.get("p")
+        size = levels.get("size") or levels.get("s")
+        try:
+            return float(price) if price else None, float(size) if size else None
+        except Exception:
+            return None, None
+    if isinstance(levels, list):
+        first = levels[0]
+        if isinstance(first, dict):
+            price = first.get("price") or first.get("p")
+            size = first.get("size") or first.get("s")
+            try:
+                return float(price) if price else None, float(size) if size else None
+            except Exception:
+                return None, None
+    return None, None
 
-def get_last_marketdata_age_seconds() -> float:
-    """Segundos desde el último tick recibido."""
-    if not last_marketdata_at:
-        return 1e9
-    return time.time() - last_marketdata_at
+def _extract_symbol(message: Dict[str, Any]) -> Optional[str]:
+    inst = message.get("instrumentId")
+    if isinstance(inst, dict) and "symbol" in inst:
+        return inst["symbol"]
+    return message.get("symbol")
 
-# -------- Notificador neutro (solo log) --------
-def _notify(text: str):
-    print("[notify]", text)
+def _extract_ts(message: Dict[str, Any]) -> int:
+    for k in ("timestamp", "ts", "mdTimestamp", "time"):
+        v = message.get(k)
+        if isinstance(v, (int, float)):
+            if v < 10_000_000_000:
+                return int(v * 1000)
+            return int(v)
+    return int(time.time() * 1000)
 
-# -------- Broadcaster WebSocket --------
-class WebSocketBroadcaster:
-    def __init__(self):
-        self.active_clients = []
-        self.queue = asyncio.Queue()
-        self.loop = None
-        # lanzamos consumidor en el loop actual
-        asyncio.get_event_loop().create_task(self._consumer())
+def _extract_levels(message: Dict[str, Any]):
+    md = message.get("marketData") or message.get("md") or message
+    bids = md.get("BI") or md.get("bids") or md.get("bid")
+    offs = md.get("OF") or md.get("offers") or md.get("ask") or md.get("offer")
+    last = md.get("LA") or md.get("last")
+    b_price, b_size = _first_price_and_size(bids)
+    a_price, a_size = _first_price_and_size(offs)
+    l_price, l_size = _first_price_and_size(last)
+    return (b_price, b_size), (a_price, a_size), (l_price, l_size)
 
-    async def connect(self, websocket):
-        await websocket.accept()
-        self.active_clients.append(websocket)
-        if self.loop is None:
-            self.loop = asyncio.get_event_loop()
-        print(f"[ws] Cliente conectado. Total clientes: {len(self.active_clients)}")
-
-    def disconnect(self, websocket):
-        if websocket in self.active_clients:
-            self.active_clients.remove(websocket)
-            print(f"[ws] Cliente desconectado. Total clientes: {len(self.active_clients)}")
-
-    def enqueue(self, message):
-        # Convierte dict a JSON string
-        msg = json.dumps(message) if isinstance(message, dict) else str(message)
-        loop = self.loop or asyncio.get_event_loop()
-        loop.call_soon_threadsafe(self.queue.put_nowait, msg)
-
-    async def _consumer(self):
-        self.loop = asyncio.get_event_loop()
-        while True:
-            msg = await self.queue.get()
-            # enviar a todos los clientes conectados
-            for ws in self.active_clients[:]:
-                try:
-                    await ws.send_text(msg)
-                except Exception as e:
-                    print("[ws] Error enviando a cliente:", e)
-                    self.disconnect(ws)
-
-broadcaster = WebSocketBroadcaster()
-
-# -------- Manager de market data --------
 class MarketDataManager:
-    def __init__(self):
-        self.thread = None
-        self._stop_event = threading.Event()
-        self.running = False
+    def __init__(self) -> None:
+        self._pyrofex = None
+        self._ws_open = False
+        self._lock = threading.RLock()
+        self.user: Optional[str] = None
+        self._subscribed: set[str] = set()
+        self.last_marketdata_at_ms: Optional[int] = None
+        self._last_params: Optional[Dict[str, Any]] = None
 
-    def is_running(self):
-        return self.running and self.thread is not None and self.thread.is_alive()
+    def start(
+        self,
+        *,
+        user: str,
+        password: str,
+        account: str,
+        instrumentos: Iterable[str],
+        force_ws: bool = True,
+    ):
+        with self._lock:
+            # Guardar parámetros para restart
+            params = {
+                "user": user,
+                "password": password,
+                "account": account,
+                "instrumentos": list(instrumentos)
+            }
+            self._last_params = params
+            set_last_params(params)
+            
+            try:
+                import pyRofex as pr
+                self._pyrofex = pr
+            except Exception as e:
+                print(f"{PRINT_PREFIX} No se pudo importar pyRofex: {e}")
+                return {"status": "error", "error": "pyRofex not available", "ws": "disabled"}
 
-    def start(self, instrumentos, user, password, account):
-        if self.is_running():
-            print("[ws_rofex] Ya hay una suscripción corriendo.")
-            return
-        self._stop_event.clear()
-        self.thread = threading.Thread(
-            target=self._run,
-            args=(instrumentos, user, password, account),
-            daemon=True
-        )
-        self.thread.start()
-        self.running = True
-        _notify("▶️ Servicio iniciado")
-
-    def stop(self):
-        if not self.is_running():
-            self.running = False
-            return
-        self._stop_event.set()
-        self.running = False
-        print("[ws_rofex] Solicitud de detener la suscripción enviada.")
-        _notify("⏹️ Servicio detenido")
-
-    def _run(self, instrumentos, user, password, account):
-        # Handlers de pyRofex
-        def market_data_handler(message):
-            # Normalizar a dict
-            if isinstance(message, str):
-                try:
-                    message = json.loads(message)
-                except Exception:
-                    print("[ws_rofex] No se pudo decodificar el mensaje:", message)
-                    return
-            if not isinstance(message, dict):
-                print("[ws_rofex] 🔴 Mensaje no es dict tras decodificar:", type(message))
-                return
+            self.user = user
 
             try:
-                symbol = message["instrumentId"]["symbol"]
-                md = message.get("marketData", {})
-
-                # BI puede ser lista o dict
-                bi = md.get("BI")
-                if isinstance(bi, list) and bi:
-                    bid_price = bi[0].get("price")
-                    bid_size  = bi[0].get("size")
-                elif isinstance(bi, dict):
-                    bid_price = bi.get("price")
-                    bid_size  = bi.get("size")
-                else:
-                    bid_price = bid_size = None
-
-                # OF puede ser lista o dict
-                of = md.get("OF")
-                if isinstance(of, list) and of:
-                    offer_price = of[0].get("price")
-                    offer_size  = of[0].get("size")
-                elif isinstance(of, dict):
-                    offer_price = of.get("price")
-                    offer_size  = of.get("size")
-                else:
-                    offer_price = offer_size = None
-
-                # LA último precio operado
-                la = md.get("LA") or {}
-                last_price = la.get("price")
-                last_size  = la.get("size")
-
-                # Actualizar cache
-                quotes_cache[symbol] = {
-                    "bid": bid_price,
-                    "bid_size": bid_size,
-                    "offer": offer_price,
-                    "offer_size": offer_size,
-                    "last": last_price,
-                    "last_size": last_size,
-                    "timestamp": message.get("timestamp"),
-                }
-
-                # Health
-                global last_marketdata_at
-                last_marketdata_at = time.time()
-
-                # Log útil
-                print(f"[ws_rofex] tick {symbol} bid={bid_price} ofr={offer_price} last={last_price}")
-
-                # Guardado opcional en DB
-                if _GUARDAR_TICKS and _guardar_func is not None:
-                    try:
-                        _guardar_func({
-                            "symbol": symbol,
-                            "timestamp": message.get("timestamp"),
-                            "bid_price": bid_price,
-                            "bid_size": bid_size,
-                            "offer_price": offer_price,
-                            "offer_size": offer_size,
-                            "last_price": last_price,
-                            "last_size": last_size,
-                            "raw": message
-                        })
-                    except Exception as e:
-                        print("[ws_rofex] [supabase] error guardando:", e)
-
+                env = getattr(self._pyrofex.Environment, "LIVE")
+                self._pyrofex.initialize(user=user, password=password, account=account, environment=env)
             except Exception as e:
-                print("[ws_rofex] Error actualizando quotes_cache:", e)
+                return {"status": "error", "error": str(e), "ws": "disabled"}
 
-            # Broadcast a clientes WS
-            if broadcaster.active_clients:
-                print(f"[ws_rofex] broadcasting -> {len(broadcaster.active_clients)} cliente(s)")
-            broadcaster.enqueue(message)
+            def md_handler(msg: Dict[str, Any]):
+                self._handle_md(msg)
 
-        def error_handler(message):
-            print("[ws_rofex] Error Message Received:", message)
+            try:
+                self._pyrofex.init_websocket_connection(
+                    market_data_handler=md_handler,
+                    order_report_handler=lambda m: None,
+                    error_handler=lambda e: print(f"{PRINT_PREFIX} WS error: {e}")
+                )
+                self._ws_open = True
+            except Exception as e:
+                return {"status": "error", "error": str(e), "ws": "disabled"}
 
-        def exception_handler(e):
-            print("[ws_rofex] Exception Occurred:", e)
-            _notify(f"🔴 Error en servicio: {str(e)}")
+            self._subscribe_many(instrumentos)
 
-        # Elegir ambiente desde ENV (LIVE por defecto)
-        env_name = os.getenv("ROFEX_ENV", "LIVE").upper().strip()
-        env_map = {
-            "LIVE": pyRofex.Environment.LIVE,
-            "REMARKET": pyRofex.Environment.REMARKET,
-        }
-        environment = env_map.get(env_name, pyRofex.Environment.LIVE)
-        print(f"[ws_rofex] Inicializando pyRofex en entorno: {env_name}")
+            return {
+                "status": "started",
+                "user_id": self.user,
+                "instruments": list(instrumentos),
+                "ws": "ok" if self._ws_open else "disabled",
+            }
 
-        # Conexión
-        pyRofex.initialize(
-            user=user,
-            password=password,
-            account=account,
-            environment=environment
-        )
-        pyRofex.init_websocket_connection(
-            market_data_handler=market_data_handler,
-            error_handler=error_handler,
-            exception_handler=exception_handler
-        )
+    def stop(self):
+        with self._lock:
+            if self._pyrofex and self._ws_open:
+                self._pyrofex.close_websocket_connection()
+            self._ws_open = False
+            self._subscribed.clear()
+            return {"status": "stopped", "ws": "disabled"}
+
+    def restart_last(self):
+        """Reinicia con los últimos parámetros usados"""
+        if not self._last_params:
+            return {"status": "error", "error": "No hay parámetros previos para reiniciar"}
+        
+        # Detener primero
+        self.stop()
+        
+        # Reiniciar con últimos parámetros
+        return self.start(**self._last_params)
+
+    def status(self):
+        with self._lock:
+            return {
+                "ws": "ok" if self._ws_open else "disabled",
+                "user_id": self.user,
+                "subscribed": sorted(self._subscribed),
+                "last_md_ms": self.last_marketdata_at_ms,
+                "subscribers": broadcaster.subscribers(),
+            }
+
+    def _subscribe_many(self, instrumentos: Iterable[str]):
+        if not self._pyrofex or not self._ws_open:
+            return
         entries = [
-            pyRofex.MarketDataEntry.BIDS,
-            pyRofex.MarketDataEntry.OFFERS,
-            pyRofex.MarketDataEntry.LAST
+            self._pyrofex.MarketDataEntry.BIDS,
+            self._pyrofex.MarketDataEntry.OFFERS,
+            self._pyrofex.MarketDataEntry.LAST
         ]
-        pyRofex.market_data_subscription(
-            tickers=instrumentos,
-            entries=entries
-        )
-        print("[ws_rofex] Suscripción iniciada, esperando evento de parada...")
+        for sym in instrumentos:
+            if sym not in self._subscribed:
+                try:
+                    self._pyrofex.market_data_subscription(tickers=[sym], entries=entries)
+                    self._subscribed.add(sym)
+                    print(f"{PRINT_PREFIX} Suscripto {sym}")
+                except Exception as e:
+                    print(f"{PRINT_PREFIX} Error al suscribir {sym}: {e}")
 
-        # Espera hasta que pidan detener
-        while not self._stop_event.is_set():
-            time.sleep(1)
+    def _handle_md(self, message: Dict[str, Any]):
+        global _guardar_tick  # Declarar global al inicio
+        
+        symbol = _extract_symbol(message)
+        if not symbol:
+            return
+        (bid_p, bid_sz), (ask_p, ask_sz), (last_p, last_sz) = _extract_levels(message)
+        ts_ms = _extract_ts(message)
+        self.last_marketdata_at_ms = ts_ms
+        quotes_cache[symbol] = {
+            "bid": bid_p, "bid_size": bid_sz,
+            "offer": ask_p, "offer_size": ask_sz,
+            "last": last_p, "last_size": last_sz,
+            "timestamp": ts_ms,
+        }
+        if _guardar_tick:
+            try:
+                # Solo guardar si la tabla existe y hay datos válidos
+                if symbol and (bid_p is not None or ask_p is not None or last_p is not None):
+                    tick_data = {
+                        "symbol": symbol, 
+                        "bid": bid_p, 
+                        "offer": ask_p, 
+                        "last": last_p, 
+                        "ts_ms": ts_ms,
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z")
+                    }
+                    # Intentar guardar pero no fallar si la tabla no existe
+                    result = _guardar_tick("ticks", tick_data)
+                    if result is None:
+                        # La tabla no existe, desactivar guardado
+                        print(f"{PRINT_PREFIX} Tabla 'ticks' no existe, desactivando guardado de ticks")
+                        # Desactivar guardado para futuras llamadas
+                        _guardar_tick = None
+            except Exception as e:
+                print(f"{PRINT_PREFIX} fallo insert: {e}")
+                # Desactivar guardado en caso de error
+                _guardar_tick = None
 
-        print("[ws_rofex] Deteniendo suscripción y cerrando conexión websocket.")
-        try:
-            pyRofex.close_websocket_connection()
-        except Exception:
-            pass
+manager = MarketDataManager()

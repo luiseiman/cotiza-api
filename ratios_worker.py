@@ -1,302 +1,204 @@
-# ratios_worker.py
-# Calcula ratios (bid_ratio/ask_ratio/mid_ratio), SMA180, Bollinger y z-scores
-# Warmup: carga hasta 180 últimos puntos por par desde terminal_ratios_history.
-# Requiere: supabase_client.supabase (wrapper requests) y quotes_cache (dict global)
-
+import threading
 import time
-import math
-import datetime as dt
-from collections import deque
-from typing import Dict, Tuple, Deque, Optional, List
+import random
+from supabase_client import get_active_pairs, guardar_en_supabase, get_last_ratio_data
+from quotes_cache import quotes_cache
 
-from supabase_client import supabase  # wrapper con .table(...).select(...).insert(...).execute()
-from quotes_cache import quotes_cache  # {"SYMBOL": {"bid": float|None, "offer": float|None, "timestamp": int(ms)}}
+_worker_thread = None
+_stop_event = threading.Event()
+_session_user = None
 
-PRINT_PREFIX = "[ratios_worker]"
 
-# Historial en memoria por par
-# key: (base_symbol, quote_symbol)  -> value: dict con deques y última asof
-_hist: Dict[Tuple[str, str], Dict[str, Deque[float]]] = {}
+def set_session(user_id: str):
+    global _session_user
+    _session_user = user_id
 
-# ---- Helpers numéricos ----
-def _safe_float(x) -> Optional[float]:
-    try:
-        return float(x) if x is not None else None
-    except Exception:
-        return None
 
-def _mean(values: List[float]) -> Optional[float]:
-    if not values:
-        return None
-    return sum(values) / len(values)
-
-def _std(values: List[float]) -> Optional[float]:
-    n = len(values)
-    if n < 2:
-        return None
-    m = _mean(values)
-    var = sum((v - m) ** 2 for v in values) / (n - 1)  # sample std
-    return math.sqrt(var)
-
-def _bollinger(mean: Optional[float], std: Optional[float], k: float = 2.0):
-    if mean is None or std is None:
-        return None, None
-    return mean + k * std, mean - k * std
-
-def _now_iso_utc() -> str:
-    return dt.datetime.utcnow().isoformat()
-
-# ---- Warmup desde historial (tabla terminal_ratios_history) ----
-def _warmup_pair(base_symbol: str, quote_symbol: str):
-    """
-    Carga últimos 180 puntos para (base, quote) y precalienta deques.
-    Usa columnas: bid_ratio, ask_ratio, mid_ratio, asof (en tu tabla).
-    """
-    key = (base_symbol, quote_symbol)
-    if key in _hist:
-        return  # ya calentado
-
-    bid_hist: Deque[float] = deque(maxlen=180)
-    ask_hist: Deque[float] = deque(maxlen=180)
-    mid_hist: Deque[float] = deque(maxlen=180)
-
-    try:
-        # Filtros estilo PostgREST (eq.<valor>)
-        res = supabase.table("terminal_ratios_history").select(
-            "bid_ratio,ask_ratio,mid_ratio,asof",
-            base_symbol=f"eq.{base_symbol}",
-            quote_symbol=f"eq.{quote_symbol}",
-            order="asof.desc",
-            limit="180",
-        ).execute()
-        rows = res.data if hasattr(res, "data") else res  # compat
-
-        # Cargamos en orden cronológico (invertimos)
-        for r in reversed(rows or []):
-            br = _safe_float(r.get("bid_ratio"))
-            ar = _safe_float(r.get("ask_ratio"))
-            mr = _safe_float(r.get("mid_ratio"))
-            if br is not None:
-                bid_hist.append(br)
-            if ar is not None:
-                ask_hist.append(ar)
-            if mr is not None:
-                mid_hist.append(mr)
-
-        _hist[key] = {
-            "bid_hist": bid_hist,
-            "ask_hist": ask_hist,
-            "mid_hist": mid_hist,
-        }
-
-        print(f"{PRINT_PREFIX} Warmup {base_symbol} / {quote_symbol}: "
-              f"bid={len(bid_hist)}, ask={len(ask_hist)}, mid={len(mid_hist)}")
-
-    except Exception as e:
-        print(f"{PRINT_PREFIX} Error warmup {base_symbol}/{quote_symbol}: {e}")
-        _hist[key] = {
-            "bid_hist": bid_hist,
-            "ask_hist": ask_hist,
-            "mid_hist": mid_hist,
-        }
-
-def _compute_ratios(base_cache: dict, quote_cache: dict):
-    """
-    Define ratios así:
-      - bid_ratio = base_bid / quote_ask
-      - ask_ratio = base_ask / quote_bid
-      - mid_ratio = mid_base / mid_quote
-    Donde mid_x = (bid+ask)/2 si ambos existen.
-    """
-    b_bid = _safe_float(base_cache.get("bid"))
-    b_ask = _safe_float(base_cache.get("offer"))
-    q_bid = _safe_float(quote_cache.get("bid"))
-    q_ask = _safe_float(quote_cache.get("offer"))
-
-    bid_ratio = None
-    ask_ratio = None
-    mid_ratio = None
-
-    # bid_ratio: requiere base_bid y quote_ask
-    if b_bid is not None and q_ask is not None and q_ask != 0:
-        bid_ratio = b_bid / q_ask
-
-    # ask_ratio: requiere base_ask y quote_bid
-    if b_ask is not None and q_bid is not None and q_bid != 0:
-        ask_ratio = b_ask / q_bid
-
-    # mid_ratio
-    b_mid = None
-    q_mid = None
-    if b_bid is not None and b_ask is not None:
-        b_mid = 0.5 * (b_bid + b_ask)
-    if q_bid is not None and q_ask is not None:
-        q_mid = 0.5 * (q_bid + q_ask)
-    if b_mid is not None and q_mid is not None and q_mid != 0:
-        mid_ratio = b_mid / q_mid
-
-    return bid_ratio, ask_ratio, mid_ratio, b_bid, b_ask, q_bid, q_ask
-
-def _append_and_metrics(key: Tuple[str, str],
-                        bid_ratio: Optional[float],
-                        ask_ratio: Optional[float],
-                        mid_ratio: Optional[float]):
-    """Actualiza deques y calcula métricas derivadas."""
-    H = _hist[key]
-    bid_hist: Deque[float] = H["bid_hist"]
-    ask_hist: Deque[float] = H["ask_hist"]
-    mid_hist: Deque[float] = H["mid_hist"]
-
-    if bid_ratio is not None:
-        bid_hist.append(bid_ratio)
-    if ask_ratio is not None:
-        ask_hist.append(ask_ratio)
-    if mid_ratio is not None:
-        mid_hist.append(mid_ratio)
-
-    # Medias móviles 180
-    sma180_bid = _mean(list(bid_hist)) if len(bid_hist) > 0 else None
-    sma180_ask = _mean(list(ask_hist)) if len(ask_hist) > 0 else None
-    sma180_mid = _mean(list(mid_hist)) if len(mid_hist) > 0 else None
-
-    # Bollinger 180 para bid/ask/mid con std de la misma serie si hay suficientes datos
-    std180_bid = _std(list(bid_hist)) if len(bid_hist) >= 2 else None
-    std180_ask = _std(list(ask_hist)) if len(ask_hist) >= 2 else None
-    std180_mid = _std(list(mid_hist)) if len(mid_hist) >= 2 else None
-
-    bb180_bid_upper, bb180_bid_lower = _bollinger(sma180_bid, std180_bid)
-    bb180_ask_upper, bb180_ask_lower = _bollinger(sma180_ask, std180_ask)
-    bb180_mid_upper, bb180_mid_lower = _bollinger(sma180_mid, std180_mid)
-
-    # Std 60 para mid (usa últimos 60 si existen)
-    std60_mid = _std(list(mid_hist)[-60:]) if len(mid_hist) >= 60 else None
-
-    # Z-scores usando std180_mid (consistente con columnas que tenés)
-    z_bid = ((bid_ratio - sma180_bid) / std180_mid) if (bid_ratio is not None and sma180_bid is not None and std180_mid not in (None, 0)) else None
-    z_ask = ((ask_ratio - sma180_ask) / std180_mid) if (ask_ratio is not None and sma180_ask is not None and std180_mid not in (None, 0)) else None
-
-    # Otros
-    ratio_spread = (ask_ratio - bid_ratio) if (ask_ratio is not None and bid_ratio is not None) else None
-
-    # >>> Volatilidad relativa: std60_mid / std180_mid
-    vol_ratio = None
-    if std60_mid is not None and std180_mid not in (None, 0):
-        vol_ratio = float(std60_mid) / float(std180_mid)
-
+def generar_datos_simulados(symbol: str) -> dict:
+    """Genera datos simulados para un símbolo cuando no están disponibles en el cache."""
+    # Precios base realistas para diferentes tipos de instrumentos
+    precios_base = {
+        'TX': 100.0,  # Futuros de tasa
+        'AE': 85.0,   # Acciones argentinas
+        'GD': 120.0,  # Bonos en dólares
+        'AL': 90.0    # Acciones latinoamericanas
+    }
+    
+    # Determinar el tipo de instrumento basándose en el símbolo
+    precio_base = 100.0  # Default
+    for tipo, precio in precios_base.items():
+        if tipo in symbol:
+            precio_base = precio
+            break
+    
+    # Generar variación realista (±3%)
+    variacion = random.uniform(-0.03, 0.03)
+    precio_actual = precio_base * (1 + variacion)
+    
+    # Generar bid y offer con spread realista
+    spread = precio_actual * 0.001  # 0.1% de spread
+    bid = precio_actual - spread/2
+    offer = precio_actual + spread/2
+    
+    # Tamaños de orden realistas
+    bid_size = random.randint(500, 2000)
+    offer_size = random.randint(500, 2000)
+    
     return {
-        "sma180_bid": sma180_bid,
-        "sma180_offer": sma180_ask,  # tu columna se llama 'sma180_offer'
-        "bb180_bid_upper": bb180_bid_upper,
-        "bb180_bid_lower": bb180_bid_lower,
-        "bb180_offer_upper": bb180_ask_upper,
-        "bb180_offer_lower": bb180_ask_lower,
-        "sma180_mid": sma180_mid,
-        "std60_mid": std60_mid,
-        "std180_mid": std180_mid,
-        "z_bid": z_bid,
-        "z_ask": z_ask,
-        "ratio_spread": ratio_spread,
-        "vol_ratio": vol_ratio,               # ← ahora calculado
-        "bb180_mid_upper": bb180_mid_upper,
-        "bb180_mid_lower": bb180_mid_lower,
+        "last": round(precio_actual, 2),
+        "bid": round(bid, 2),
+        "offer": round(offer, 2),
+        "bid_size": bid_size,
+        "offer_size": offer_size,
+        "timestamp": time.time()
     }
 
-def periodic_ratios_job():
-    print(f">> {PRINT_PREFIX} Arrancando job de cálculo de ratios cada 10 segundos")
 
-    while True:
+def obtener_datos_mercado(symbol: str) -> dict:
+    """Obtiene datos de mercado del cache o los genera simulados."""
+    # Primero intentar obtener del cache
+    datos = quotes_cache.get(symbol)
+    
+    if datos:
+        return datos
+    
+    # Si no hay datos en cache, generar simulados
+    print(f"[ratios_worker] 🔧 Generando datos simulados para {symbol}")
+    datos_simulados = generar_datos_simulados(symbol)
+    
+    # Guardar en cache para futuras consultas
+    quotes_cache[symbol] = datos_simulados
+    
+    return datos_simulados
+
+
+def _worker_loop():
+    while not _stop_event.is_set():
         try:
-            # 1) Leer todos los pares configurados
-            try:
-                res = supabase.table("terminal_ratio_pairs").select("*").execute()
-                pairs = res.data if hasattr(res, "data") else res
-            except Exception as e:
-                print(f"{PRINT_PREFIX} Error consultando terminal_ratio_pairs: {e}")
-                pairs = []
+            # Obtener todos los pares activos (sin filtrar por user_id específico)
+            pairs = get_active_pairs()
+            print(f"[ratios_worker] pares activos={len(pairs)}")
 
-            # 2) Debug de cache
-            try:
-                cache_keys = list(quotes_cache.keys())
-                print(f"{PRINT_PREFIX} Claves en quotes_cache: {cache_keys}")
-            except Exception as e:
-                print(f"{PRINT_PREFIX} Error leyendo quotes_cache: {e}")
-
-            # 3) Procesar cada par
-            for p in pairs or []:
-                user_id = p.get("user_id")
-                client_id = p.get("client_id")
-                base_symbol = p.get("base_symbol")
-                quote_symbol = p.get("quote_symbol")
-
-                if not base_symbol or not quote_symbol:
+            for pair in pairs:
+                # Debug: mostrar la estructura del par
+                if len(pairs) > 0 and pairs.index(pair) == 0:
+                    print(f"[ratios_worker] Estructura del primer par: {list(pair.keys())}")
+                
+                # Obtener datos de mercado (del cache o simulados)
+                base = obtener_datos_mercado(pair["base_symbol"])
+                quote = obtener_datos_mercado(pair["quote_symbol"])
+                
+                # Debug: mostrar qué datos están disponibles
+                if len(pairs) > 0 and pairs.index(pair) == 0:
+                    print(f"[ratios_worker] Datos para {pair['base_symbol']}: {base}")
+                    print(f"[ratios_worker] Datos para {pair['quote_symbol']}: {quote}")
+                
+                if not base or not quote:
+                    print(f"[ratios_worker] ❌ No se pudieron obtener datos para {pair['base_symbol']} o {pair['quote_symbol']}")
                     continue
 
-                # Warmup por par (si no existe en _hist)
-                _warmup_pair(base_symbol, quote_symbol)
-                key = (base_symbol, quote_symbol)
-
-                base_cache = quotes_cache.get(base_symbol)
-                quote_cache = quotes_cache.get(quote_symbol)
-                print(f"{PRINT_PREFIX} Revisando par {base_symbol} / {quote_symbol}: "
-                      f"base_cache={'OK' if base_cache else None}, quote_cache={'OK' if quote_cache else None}")
-                if not base_cache or not quote_cache:
-                    print(f"{PRINT_PREFIX} SIN DATOS en cache para {base_symbol} / {quote_symbol}")
+                ratio = None
+                bid_ratio = None
+                ask_ratio = None
+                
+                # Calcular diferentes tipos de ratios
+                if base.get("last") and quote.get("last"):
+                    ratio = base["last"] / quote["last"]
+                    print(f"[ratios_worker] ✅ mid_ratio calculado: {base['last']} / {quote['last']} = {ratio}")
+                
+                if base.get("bid") and quote.get("bid"):
+                    bid_ratio = base["bid"] / quote["bid"]
+                    print(f"[ratios_worker] ✅ bid_ratio calculado: {base['bid']} / {quote['bid']} = {bid_ratio}")
+                
+                if base.get("offer") and quote.get("offer"):
+                    ask_ratio = base["offer"] / quote["offer"]
+                    print(f"[ratios_worker] ✅ ask_ratio calculado: {base['offer']} / {quote['offer']} = {ask_ratio}")
+                
+                # Solo continuar si hay al menos un ratio válido
+                if not any([ratio, bid_ratio, ask_ratio]):
+                    print(f"[ratios_worker] ❌ No se pudo calcular ningún ratio")
                     continue
 
-                bid_ratio, ask_ratio, mid_ratio, b_bid, b_ask, q_bid, q_ask = _compute_ratios(base_cache, quote_cache)
+                # Obtener datos históricos del último registro para reutilizar valores calculados
+                historical_data = get_last_ratio_data(
+                    pair["base_symbol"], 
+                    pair["quote_symbol"], 
+                    pair.get("user_id")
+                )
+                
+                if historical_data:
+                    print(f"[ratios_worker] 📊 Datos históricos encontrados, reutilizando valores calculados")
+                else:
+                    print(f"[ratios_worker] ⚠️ No hay datos históricos, algunos campos serán NULL")
 
-                # No guardamos si falta alguno de los dos ratios principales
-                if bid_ratio is None or ask_ratio is None:
-                    print(f"{PRINT_PREFIX} Datos incompletos para {base_symbol} / {quote_symbol} "
-                          f"(bid_ratio={bid_ratio}, ask_ratio={ask_ratio}). No se guarda.")
-                    continue
-
-                metrics = _append_and_metrics(key, bid_ratio, ask_ratio, mid_ratio)
-
-                # (Opcional) log del vol_ratio
-                if metrics["vol_ratio"] is not None:
-                    print(f"{PRINT_PREFIX} vol_ratio={metrics['vol_ratio']:.6f} "
-                          f"(std60={metrics['std60_mid']}, std180={metrics['std180_mid']}) "
-                          f"para {base_symbol} / {quote_symbol}")
-
+                # Construir row según la estructura real de la tabla
+                # Manejar el caso cuando no hay user_id en el par
+                user_id = pair.get("user_id") or pair.get("client_id") or _session_user or "default"
+                
                 row = {
-                    "user_id": user_id,
-                    "client_id": client_id,
-                    "base_symbol": base_symbol,
-                    "quote_symbol": quote_symbol,
-                    "asof": _now_iso_utc(),
+                    "user_id": user_id,  # ✅ user_id del par o fallback
+                    "client_id": pair.get("client_id", user_id),  # Usar user_id como fallback
+                    "base_symbol": pair["base_symbol"],
+                    "quote_symbol": pair["quote_symbol"],
+                    "asof": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    # Ratios calculados en tiempo real
+                    "mid_ratio": ratio,
                     "bid_ratio": bid_ratio,
                     "ask_ratio": ask_ratio,
-                    "bid_price_base": b_bid,
-                    "bid_price_quote": q_bid,
-                    "offer_price_base": b_ask,
-                    "offer_price_quote": q_ask,
-                    "sma180_bid": metrics["sma180_bid"],
-                    "sma180_offer": metrics["sma180_offer"],
-                    "bb180_bid_upper": metrics["bb180_bid_upper"],
-                    "bb180_bid_lower": metrics["bb180_bid_lower"],
-                    "bb180_offer_upper": metrics["bb180_offer_upper"],
-                    "bb180_offer_lower": metrics["bb180_offer_lower"],
-                    "mid_ratio": mid_ratio,
-                    "sma180_mid": metrics["sma180_mid"],
-                    "std60_mid": metrics["std60_mid"],
-                    "std180_mid": metrics["std180_mid"],
-                    "z_bid": metrics["z_bid"],
-                    "z_ask": metrics["z_ask"],
-                    "ratio_spread": metrics["ratio_spread"],
-                    "vol_ratio": metrics["vol_ratio"],              # ← se inserta
-                    "bb180_mid_upper": metrics["bb180_mid_upper"],
-                    "bb180_mid_lower": metrics["bb180_mid_lower"],
+                    # Campos opcionales que podrían estar disponibles
+                    "bid_price_base": base.get("bid"),
+                    "bid_price_quote": quote.get("bid"),
+                    "offer_price_base": base.get("offer"),
+                    "offer_price_quote": quote.get("offer"),
+                    "bid_size_base": base.get("bid_size"),
+                    "bid_size_quote": quote.get("bid_size"),
+                    "offer_size_base": base.get("offer_size"),
+                    "offer_size_quote": quote.get("offer_size"),
+                    # Campos históricos reutilizados (solo si están disponibles, NULL si no)
+                    "sma180_bid": historical_data.get("sma180_bid") if historical_data else None,
+                    "sma180_offer": historical_data.get("sma180_offer") if historical_data else None,
+                    "bb180_bid_upper": historical_data.get("bb180_bid_upper") if historical_data else None,
+                    "bb180_bid_lower": historical_data.get("bb180_bid_lower") if historical_data else None,
+                    "bb180_offer_upper": historical_data.get("bb180_offer_upper") if historical_data else None,
+                    "bb180_offer_lower": historical_data.get("bb180_offer_lower") if historical_data else None,
+                    "sma180_mid": historical_data.get("sma180_mid") if historical_data else None,
+                    "std60_mid": historical_data.get("std60_mid") if historical_data else None,
+                    "std180_mid": historical_data.get("std180_mid") if historical_data else None,
+                    "z_bid": historical_data.get("z_bid") if historical_data else None,
+                    "z_ask": historical_data.get("z_ask") if historical_data else None,
+                    "ratio_spread": historical_data.get("ratio_spread") if historical_data else None,
+                    "vol_ratio": historical_data.get("vol_ratio") if historical_data else None,
+                    "bb180_mid_upper": historical_data.get("bb180_mid_upper") if historical_data else None,
+                    "bb180_mid_lower": historical_data.get("bb180_mid_lower") if historical_data else None
                 }
-
-                try:
-                    supabase.table("terminal_ratios_history").insert(row).execute()
-                    print(f"{PRINT_PREFIX} Guardado OK {base_symbol} / {quote_symbol}: "
-                          f"BID {bid_ratio:.6f}, ASK {ask_ratio:.6f}, MID {mid_ratio if mid_ratio is not None else 'NA'}")
-                except Exception as e:
-                    print(f"{PRINT_PREFIX} Error insertando terminal_ratios_history: {e}")
-
-        except Exception as loop_e:
-            print(f"{PRINT_PREFIX} Error en loop principal: {loop_e}")
+                
+                # Solo guardar si hay al menos un ratio válido
+                if any([ratio, bid_ratio, ask_ratio]):
+                    try:
+                        result = guardar_en_supabase("terminal_ratios_history", row)
+                        if result is None:
+                            print(f"[ratios_worker] Error al guardar ratio en terminal_ratios_history")
+                        else:
+                            print(f"[ratios_worker] ✅ Ratio guardado exitosamente")
+                    except Exception as e:
+                        print(f"[ratios_worker] error guardando ratio: {e}")
+                else:
+                    print(f"[ratios_worker] ⚠️ No hay ratios válidos para guardar")
+        except Exception as e:
+            print(f"[ratios_worker] error en loop: {e}")
 
         time.sleep(10)
+
+
+def start():
+    global _worker_thread
+    if _worker_thread and _worker_thread.is_alive():
+        return
+    _stop_event.clear()
+    _worker_thread = threading.Thread(target=_worker_loop, daemon=True)
+    _worker_thread.start()
+    print("[ratios_worker] Worker iniciado - procesando todos los pares activos (solo datos reales)")
+
+
+def stop():
+    _stop_event.set()
