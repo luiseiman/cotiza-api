@@ -1,0 +1,56 @@
+# ========================================
+# CONFIGURACIÓN DEL BOT DE TELEGRAM
+# ========================================
+
+# Token del bot de Telegram (OBLIGATORIO)
+# Obtener de @BotFather en Telegram
+TELEGRAM_TOKEN=tu_token_aqui
+
+# Chat ID del administrador (OBLIGATORIO)
+# Obtener de @userinfobot en Telegram
+TELEGRAM_CHAT_ID=tu_chat_id_aqui
+
+# Habilitar polling del bot (1=habilitado, 0=deshabilitado)
+# Por defecto: 1 (habilitado)
+TELEGRAM_POLLING=1
+
+# Puerto para el lock de red (evita múltiples instancias)
+# Por defecto: 12345
+TELEGRAM_LOCK_PORT=12345
+
+# Base de la API local
+# Por defecto: http://127.0.0.1:8000
+API_BASE=http://127.0.0.1:8000
+
+# Puerto de la API local
+# Por defecto: 8000
+PORT=8000
+
+# ========================================
+# CONFIGURACIÓN DE ROFEX (si aplica)
+# ========================================
+
+# Credenciales de ROFEX
+ROFEX_USER=tu_usuario_rofex
+ROFEX_PASSWORD=tu_password_rofex
+ROFEX_ACCOUNT=tu_cuenta_rofex
+
+# Instrumentos JSON (fallback si no hay DB)
+INSTRUMENTS_JSON=["GGAL", "PAMP", "YPF"]
+
+# ========================================
+# CONFIGURACIÓN DE SUPABASE (si aplica)
+# ========================================
+
+SUPABASE_URL=tu_url_supabase
+SUPABASE_KEY=tu_key_supabase
+
+# ========================================
+# NOTAS IMPORTANTES
+# ========================================
+
+# 1. NUNCA compartas tu TELEGRAM_TOKEN
+# 2. El TELEGRAM_CHAT_ID debe ser un número
+# 3. TELEGRAM_LOCK_PORT debe ser único en tu red
+# 4. Si cambias el puerto, actualiza también API_BASE
+# 5. Para deshabilitar el bot, establece TELEGRAM_POLLING=0

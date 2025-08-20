@@ -1,5 +1,6 @@
-from fastapi import FastAPI, Body
+from fastapi import FastAPI, Body, WebSocket, WebSocketDisconnect, HTTPException, status
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import ws_rofex
 from ratios_worker import start as start_worker, stop as stop_worker, set_session as set_worker_session
 import telegram_control as tg
@@ -9,6 +10,7 @@ import threading
 import time
 import os, json
 import requests
+import asyncio
 from typing import Set
 try:
 	from dotenv import load_dotenv
@@ -18,7 +20,16 @@ except ImportError:
 
 from supabase_client import get_active_pairs
 
-app = FastAPI()
+app = FastAPI(title="Cotiza API", version="1.0.0")
+
+# Configurar CORS para permitir conexiones WebSocket
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # En producción, especifica los orígenes permitidos
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Estado global del servicio
 _service_status = {
@@ -216,6 +227,135 @@ def health():
     """Endpoint de salud simple para verificar que la API está funcionando"""
     return {"status": "healthy", "timestamp": time.time()}
 
+
+# WebSocket connections
+_websocket_connections = []
+_websocket_lock = threading.Lock()
+
+@app.websocket("/ws/cotizaciones")
+async def websocket_endpoint(websocket: WebSocket):
+    """Endpoint WebSocket para cotizaciones en tiempo real"""
+    try:
+        # Aceptar la conexión
+        await websocket.accept()
+        print(f"[websocket] Nueva conexión desde {websocket.client.host}:{websocket.client.port}")
+        
+        # Agregar a la lista de conexiones activas
+        with _websocket_lock:
+            _websocket_connections.append(websocket)
+        
+        # Enviar mensaje de bienvenida
+        await websocket.send_text(json.dumps({
+            "type": "connection",
+            "status": "connected",
+            "timestamp": time.time(),
+            "message": "Conexión WebSocket establecida"
+        }))
+        
+        # Mantener la conexión activa y escuchar mensajes
+        try:
+            while True:
+                # Esperar mensajes del cliente
+                data = await websocket.receive_text()
+                try:
+                    message = json.loads(data)
+                    print(f"[websocket] Mensaje recibido: {message}")
+                    
+                    # Procesar mensaje según el tipo
+                    if message.get("type") == "ping":
+                        await websocket.send_text(json.dumps({
+                            "type": "pong",
+                            "timestamp": time.time()
+                        }))
+                    elif message.get("type") == "subscribe":
+                        # Suscribir a cotizaciones específicas
+                        await websocket.send_text(json.dumps({
+                            "type": "subscribed",
+                            "instruments": message.get("instruments", []),
+                            "timestamp": time.time()
+                        }))
+                    else:
+                        await websocket.send_text(json.dumps({
+                            "type": "error",
+                            "message": "Tipo de mensaje no reconocido",
+                            "timestamp": time.time()
+                        }))
+                        
+                except json.JSONDecodeError:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": "JSON inválido",
+                        "timestamp": time.time()
+                    }))
+                    
+        except WebSocketDisconnect:
+            print(f"[websocket] Cliente desconectado: {websocket.client.host}:{websocket.client.port}")
+        except Exception as e:
+            print(f"[websocket] Error en WebSocket: {e}")
+            await websocket.send_text(json.dumps({
+                "type": "error",
+                "message": f"Error interno: {str(e)}",
+                "timestamp": time.time()
+            }))
+            
+    except Exception as e:
+        print(f"[websocket] Error al aceptar conexión: {e}")
+    finally:
+        # Remover de la lista de conexiones activas
+        with _websocket_lock:
+            if websocket in _websocket_connections:
+                _websocket_connections.remove(websocket)
+        print(f"[websocket] Conexión cerrada: {websocket.client.host}:{websocket.client.port}")
+
+
+def broadcast_to_websockets(message: dict):
+    """Envía un mensaje a todos los clientes WebSocket conectados"""
+    disconnected = []
+    
+    with _websocket_lock:
+        for websocket in _websocket_connections:
+            try:
+                # Verificar si la conexión sigue activa
+                if websocket.client_state.value == 1:  # WebSocketState.CONNECTED
+                    asyncio.create_task(websocket.send_text(json.dumps(message)))
+                else:
+                    disconnected.append(websocket)
+            except Exception as e:
+                print(f"[websocket] Error enviando mensaje: {e}")
+                disconnected.append(websocket)
+    
+    # Limpiar conexiones desconectadas
+    if disconnected:
+        with _websocket_lock:
+            for ws in disconnected:
+                if ws in _websocket_connections:
+                    _websocket_connections.remove(ws)
+        print(f"[websocket] {len(disconnected)} conexiones desconectadas removidas")
+
+
+@app.get("/cotizaciones/websocket_status")
+def websocket_status():
+    """Obtiene el estado de las conexiones WebSocket"""
+    with _websocket_lock:
+        active_connections = len(_websocket_connections)
+        connections_info = []
+        
+        for ws in _websocket_connections:
+            try:
+                connections_info.append({
+                    "host": ws.client.host,
+                    "port": ws.client.port,
+                    "state": ws.client_state.value
+                })
+            except Exception:
+                pass
+    
+    return {
+        "active_connections": active_connections,
+        "connections": connections_info,
+        "timestamp": time.time()
+    }
+
 @app.get("/cotizaciones/telegram_diag")
 def telegram_diag():
     try:
@@ -289,6 +429,45 @@ def telegram_sync_commands():
         r = requests.post(url, json={"commands": commands})
         ok = r.status_code == 200 and r.json().get("ok") is True
         return {"status": "ok" if ok else "error", "http": r.status_code, "resp": r.json()}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/cotizaciones/telegram_locks_status")
+def telegram_locks_status():
+    """Verifica el estado de todos los locks del bot"""
+    try:
+        import telegram_control as tg
+        if hasattr(tg, "current_status"):
+            return tg.current_status()
+        else:
+            return {"status": "error", "message": "Función no disponible"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.get("/cotizaciones/telegram_check_other_bots")
+def telegram_check_other_bots():
+    """Verifica si hay otros bots ejecutándose en el sistema"""
+    try:
+        import telegram_control as tg
+        if hasattr(tg, "check_other_bots"):
+            return tg.check_other_bots()
+        else:
+            return {"status": "error", "message": "Función no disponible"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@app.post("/cotizaciones/telegram_force_cleanup")
+def telegram_force_cleanup():
+    """Fuerza la limpieza de todos los locks obsoletos"""
+    try:
+        import telegram_control as tg
+        if hasattr(tg, "force_cleanup_locks"):
+            return tg.force_cleanup_locks()
+        else:
+            return {"status": "error", "message": "Función no disponible"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
