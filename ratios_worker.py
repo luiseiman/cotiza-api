@@ -14,62 +14,14 @@ def set_session(user_id: str):
     _session_user = user_id
 
 
-def generar_datos_simulados(symbol: str) -> dict:
-    """Genera datos simulados para un símbolo cuando no están disponibles en el cache."""
-    # Precios base realistas para diferentes tipos de instrumentos
-    precios_base = {
-        'TX': 100.0,  # Futuros de tasa
-        'AE': 85.0,   # Acciones argentinas
-        'GD': 120.0,  # Bonos en dólares
-        'AL': 90.0    # Acciones latinoamericanas
-    }
-    
-    # Determinar el tipo de instrumento basándose en el símbolo
-    precio_base = 100.0  # Default
-    for tipo, precio in precios_base.items():
-        if tipo in symbol:
-            precio_base = precio
-            break
-    
-    # Generar variación realista (±3%)
-    variacion = random.uniform(-0.03, 0.03)
-    precio_actual = precio_base * (1 + variacion)
-    
-    # Generar bid y offer con spread realista
-    spread = precio_actual * 0.001  # 0.1% de spread
-    bid = precio_actual - spread/2
-    offer = precio_actual + spread/2
-    
-    # Tamaños de orden realistas
-    bid_size = random.randint(500, 2000)
-    offer_size = random.randint(500, 2000)
-    
-    return {
-        "last": round(precio_actual, 2),
-        "bid": round(bid, 2),
-        "offer": round(offer, 2),
-        "bid_size": bid_size,
-        "offer_size": offer_size,
-        "timestamp": time.time()
-    }
-
-
-def obtener_datos_mercado(symbol: str) -> dict:
-    """Obtiene datos de mercado del cache o los genera simulados."""
-    # Primero intentar obtener del cache
+def obtener_datos_mercado(symbol: str) -> dict | None:
+    """Devuelve datos solo si hay al menos un precio válido; si no, None."""
     datos = quotes_cache.get(symbol)
-    
-    if datos:
+    if not datos:
+        return None
+    if any(datos.get(k) is not None for k in ("last", "bid", "offer")):
         return datos
-    
-    # Si no hay datos en cache, generar simulados
-    print(f"[ratios_worker] 🔧 Generando datos simulados para {symbol}")
-    datos_simulados = generar_datos_simulados(symbol)
-    
-    # Guardar en cache para futuras consultas
-    quotes_cache[symbol] = datos_simulados
-    
-    return datos_simulados
+    return None
 
 
 def _worker_loop():

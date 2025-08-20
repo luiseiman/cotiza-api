@@ -204,6 +204,41 @@ def health():
     """Endpoint de salud simple para verificar que la API está funcionando"""
     return {"status": "healthy", "timestamp": time.time()}
 
+@app.get("/cotizaciones/telegram_diag")
+def telegram_diag():
+    try:
+        import telegram_control as tg
+        # evitar depender de atributos nuevos si el modulo no esta actualizado en runtime
+        info = {
+            "has_library": getattr(tg, "telebot", None) is not None,
+            "has_token": bool(getattr(tg, "BOT_TOKEN", None)),
+        }
+        try:
+            info.update(getattr(tg, "current_status")())
+        except Exception:
+            pass
+        return info
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.post("/cotizaciones/telegram_restart")
+def telegram_restart():
+    try:
+        import telegram_control as tg
+        try:
+            tg.shutdown()
+        except Exception:
+            pass
+        tg.ensure_started(
+            start_callback=lambda p: iniciar(p),
+            stop_callback=lambda: detener(),
+            restart_callback=lambda: reiniciar(),
+            status_callback=lambda: estado(),
+        )
+        return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 @app.get("/cotizaciones/last_params")
 def last_params():
 	try:
