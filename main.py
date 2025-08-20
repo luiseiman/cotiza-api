@@ -71,12 +71,19 @@ def _startup():
     print("[main] startup")
     # Habilitar el bot de Telegram solo si TELEGRAM_POLLING=1 (por defecto 1 local, 0 en Render)
     if os.getenv("TELEGRAM_POLLING", "1") == "1":
-        tg.ensure_started(
-            start_callback=lambda p: iniciar(p),
-            stop_callback=lambda: detener(),
-            restart_callback=lambda: reiniciar(),
-            status_callback=lambda: estado(),
-        )
+        try:
+            import importlib
+            import telegram_control as tg_local
+            tg_local = importlib.reload(tg_local)
+            print(f"[main] telegram_control file: {getattr(tg_local, '__file__', None)}")
+            tg_local.ensure_started(
+                start_callback=lambda p: iniciar(p),
+                stop_callback=lambda: detener(),
+                restart_callback=lambda: reiniciar(),
+                status_callback=lambda: estado(),
+            )
+        except Exception as e:
+            print(f"[main] error ensure_started: {e}")
     else:
         print("[main] Telegram polling deshabilitado por TELEGRAM_POLLING!=1")
     # No iniciar worker automáticamente, solo cuando se solicite
@@ -263,7 +270,25 @@ def telegram_sync_commands():
             tg = importlib.reload(tg)
         except Exception:
             pass
-        return tg.sync_commands()
+        # Intento 1: usar la función del módulo si existe
+        if hasattr(tg, "sync_commands"):
+            return tg.sync_commands()
+        # Intento 2: fallback directo a la API de Telegram
+        token = os.getenv("TELEGRAM_TOKEN")
+        if not token:
+            return {"status": "error", "message": "Falta TELEGRAM_TOKEN"}
+        url = f"https://api.telegram.org/bot{token}/setMyCommands"
+        commands = [
+            {"command": "ping", "description": "Comprobar que estoy vivo"},
+            {"command": "status", "description": "Ver estado del servicio"},
+            {"command": "start", "description": "Iniciar servicio {json}"},
+            {"command": "stop", "description": "Detener servicio"},
+            {"command": "restart", "description": "Reiniciar servicio"},
+            {"command": "help", "description": "Ayuda"}
+        ]
+        r = requests.post(url, json={"commands": commands})
+        ok = r.status_code == 200 and r.json().get("ok") is True
+        return {"status": "ok" if ok else "error", "http": r.status_code, "resp": r.json()}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
