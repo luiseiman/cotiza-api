@@ -20,43 +20,21 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
 def get_active_pairs(user_id: str = None):
-    """Trae los pares activos desde la tabla terminal_ratio_pairs.
-    
-    Args:
-        user_id: Parámetro ignorado (mantenido por compatibilidad).
-                 Los pares se obtienen de la tabla sin filtrar.
-    
-    Returns:
-        Lista de todos los pares activos de la tabla.
-    """
+    """Trae los pares desde terminal_ratio_pairs. Si existe 'active', filtra por True; si no, devuelve todos."""
     try:
-        # Obtener todos los pares de la tabla terminal_ratio_pairs
-        # El user_id real viene de cada registro en la tabla
-        query = supabase.table("terminal_ratio_pairs").select("*")
-        
-        # Intentar filtrar por active si existe la columna
-        try:
-            data = query.eq("active", True).execute()
-        except Exception:
-            # Si no existe la columna active, traer todos
-            data = query.execute()
-        
+        # Siempre traer todos primero (evita error 42703 si 'active' no existe)
+        data = supabase.table("terminal_ratio_pairs").select("*").execute()
         pairs = data.data or []
+
+        # Filtrar por 'active' solo si la columna existe
+        if any(isinstance(p, dict) and ('active' in p) for p in pairs):
+            pairs = [p for p in pairs if p.get("active") is True]
+
         print(f"[supabase] Obtenidos {len(pairs)} pares de terminal_ratio_pairs")
-        
         return pairs
-        
     except Exception as e:
         print(f"[supabase] error get_active_pairs: {e}")
-        # En caso de error, intentar obtener todos los pares sin filtros
-        try:
-            data = supabase.table("terminal_ratio_pairs").select("*").execute()
-            pairs = data.data or []
-            print(f"[supabase] Recuperación: obtenidos {len(pairs)} pares sin filtros")
-            return pairs
-        except Exception as e2:
-            print(f"[supabase] error en recuperación: {e2}")
-            return []
+        return []
 
 
 def list_rules(user_id: str, client_id: str = None, active: bool = True):
