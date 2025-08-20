@@ -217,6 +217,10 @@ def telegram_diag():
             info.update(getattr(tg, "current_status")())
         except Exception:
             pass
+        try:
+            info["me"] = getattr(tg, "get_me")()
+        except Exception:
+            pass
         return info
     except Exception as e:
         return {"error": str(e)}
@@ -236,6 +240,14 @@ def telegram_restart():
             status_callback=lambda: estado(),
         )
         return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.post("/cotizaciones/telegram_sync_commands")
+def telegram_sync_commands():
+    try:
+        import telegram_control as tg
+        return tg.sync_commands()
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
