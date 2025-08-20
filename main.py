@@ -207,12 +207,18 @@ def health():
 @app.get("/cotizaciones/telegram_diag")
 def telegram_diag():
     try:
+        import importlib
         import telegram_control as tg
+        try:
+            tg = importlib.reload(tg)
+        except Exception:
+            pass
         # evitar depender de atributos nuevos si el modulo no esta actualizado en runtime
         info = {
             "has_library": getattr(tg, "telebot", None) is not None,
             "has_token": bool(getattr(tg, "BOT_TOKEN", None)),
         }
+        info["module_file"] = getattr(tg, "__file__", None)
         try:
             info.update(getattr(tg, "current_status")())
         except Exception:
@@ -246,7 +252,12 @@ def telegram_restart():
 @app.post("/cotizaciones/telegram_sync_commands")
 def telegram_sync_commands():
     try:
+        import importlib
         import telegram_control as tg
+        try:
+            tg = importlib.reload(tg)
+        except Exception:
+            pass
         return tg.sync_commands()
     except Exception as e:
         return {"status": "error", "message": str(e)}
