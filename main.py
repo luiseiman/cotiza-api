@@ -8,6 +8,7 @@ from typing import List
 import threading
 import time
 import os, json
+import requests
 from typing import Set
 try:
 	from dotenv import load_dotenv
@@ -68,12 +69,16 @@ class IniciarRequest(BaseModel):
 @app.on_event("startup")
 def _startup():
     print("[main] startup")
-    tg.ensure_started(
-        start_callback=lambda p: iniciar(p),
-        stop_callback=lambda: detener(),
-        restart_callback=lambda: reiniciar(),
-        status_callback=lambda: estado(),
-    )
+    # Habilitar el bot de Telegram solo si TELEGRAM_POLLING=1 (por defecto 1 local, 0 en Render)
+    if os.getenv("TELEGRAM_POLLING", "1") == "1":
+        tg.ensure_started(
+            start_callback=lambda p: iniciar(p),
+            stop_callback=lambda: detener(),
+            restart_callback=lambda: reiniciar(),
+            status_callback=lambda: estado(),
+        )
+    else:
+        print("[main] Telegram polling deshabilitado por TELEGRAM_POLLING!=1")
     # No iniciar worker automáticamente, solo cuando se solicite
     print("[main] Servicio listo. Use /start para iniciar.")
 
@@ -259,6 +264,20 @@ def telegram_sync_commands():
         except Exception:
             pass
         return tg.sync_commands()
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.post("/cotizaciones/telegram_send_test")
+def telegram_send_test(msg: str = "test desde API"):
+    try:
+        token = os.getenv("TELEGRAM_TOKEN")
+        chat_id = os.getenv("TELEGRAM_CHAT_ID")
+        if not token or not chat_id:
+            return {"status": "error", "message": "Faltan TELEGRAM_TOKEN/TELEGRAM_CHAT_ID"}
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        r = requests.post(url, json={"chat_id": int(chat_id), "text": msg})
+        ok = r.status_code == 200 and r.json().get("ok") is True
+        return {"status": "ok" if ok else "error", "http": r.status_code, "resp": r.json()}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
