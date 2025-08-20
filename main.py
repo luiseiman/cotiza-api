@@ -7,6 +7,15 @@ from pydantic import BaseModel
 from typing import List
 import threading
 import time
+import os, json
+from typing import Set
+try:
+	from dotenv import load_dotenv
+	load_dotenv()
+except ImportError:
+	pass
+
+from supabase_client import get_active_pairs
 
 app = FastAPI()
 
@@ -22,12 +31,6 @@ _service_status = {
 }
 _status_lock = threading.Lock()
 
-class IniciarRequest(BaseModel):
-    user: str
-    password: str
-    account: str
-    instrumentos: List[str]
-
 def _update_status(**kwargs):
     """Actualiza el estado del servicio de forma thread-safe"""
     global _service_status
@@ -38,6 +41,29 @@ def _get_status():
     """Obtiene el estado actual del servicio"""
     with _status_lock:
         return _service_status.copy()
+
+def _get_env_creds():
+	user = os.getenv("ROFEX_USER")
+	password = os.getenv("ROFEX_PASSWORD")
+	account = os.getenv("ROFEX_ACCOUNT")
+	return user, password, account
+
+def _instruments_from_pairs(pairs) -> list[str]:
+	syms: Set[str] = set()
+	for p in pairs or []:
+		b = p.get("base_symbol")
+		q = p.get("quote_symbol")
+		if isinstance(b, str) and b.strip():
+			syms.add(b.strip())
+		if isinstance(q, str) and q.strip():
+			syms.add(q.strip())
+	return sorted(syms)
+
+class IniciarRequest(BaseModel):
+    user: str
+    password: str
+    account: str
+    instrumentos: List[str]
 
 @app.on_event("startup")
 def _startup():
@@ -177,3 +203,36 @@ def estado():
 def health():
     """Endpoint de salud simple para verificar que la API está funcionando"""
     return {"status": "healthy", "timestamp": time.time()}
+
+@app.get("/cotizaciones/last_params")
+def last_params():
+	try:
+		from params_store import get_last_params
+		return get_last_params() or {}
+	except Exception as e:
+		return {"error": str(e)}
+
+@app.post("/cotizaciones/iniciar_auto")
+def iniciar_auto():
+	try:
+		user, password, account = _get_env_creds()
+		if not all([user, password, account]):
+			return {"status": "error", "message": "Faltan ROFEX_USER/ROFEX_PASSWORD/ROFEX_ACCOUNT en .env"}
+
+		pairs = get_active_pairs()
+		instrumentos = _instruments_from_pairs(pairs)
+
+		# Fallback: si DB devuelve 0, usar INSTRUMENTS_JSON del .env (si está)
+		if not instrumentos:
+			try:
+				instrumentos = json.loads(os.getenv("INSTRUMENTS_JSON", "[]"))
+			except Exception:
+				instrumentos = []
+
+		if not instrumentos:
+			return {"status": "error", "message": "No hay instrumentos (DB y .env vacíos)"}
+
+		req = IniciarRequest(user=user, password=password, account=account, instrumentos=instrumentos)
+		return iniciar(req)
+	except Exception as e:
+		return {"status": "error", "message": f"Error en iniciar_auto: {str(e)}"}
