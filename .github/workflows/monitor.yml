@@ -1,0 +1,22 @@
+name: Monitor Cotiza (Render)
+on:
+  schedule:
+    - cron: "30-59/5 13 * * 1-5"  # 13:30–13:55 UTC (10:30–10:55 ART)
+    - cron: "*/5 14-19 * * 1-5"   # 14:00–19:55 UTC (11:00–16:55 ART)
+  workflow_dispatch: {}
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wake
+        run: curl -fsS https://cotiza-api-q3v6.onrender.com/cotizaciones/health || true
+      - name: Check status
+        id: st
+        run: |
+          R=$(curl -fsS https://cotiza-api-q3v6.onrender.com/cotizaciones/status || echo '{}')
+          echo "json=$R" >> $GITHUB_OUTPUT
+      - name: Restart if down or ws disconnected
+        run: |
+          echo '${{ steps.st.outputs.json }}' | jq -e '(.started==true) and (.ws_connected==true)' >/dev/null \
+          || curl -fsS -X POST https://cotiza-api-q3v6.onrender.com/cotizaciones/reiniciar
