@@ -11,7 +11,7 @@ import time
 import os, json
 import requests
 import asyncio
-from typing import Set
+from typing import Set, Optional
 try:
 	from dotenv import load_dotenv
 	load_dotenv()
@@ -80,6 +80,12 @@ class IniciarRequest(BaseModel):
 @app.on_event("startup")
 def _startup():
     print("[main] startup")
+    # Capturar event loop para envíos desde otros hilos
+    try:
+        global _event_loop
+        _event_loop = asyncio.get_event_loop()
+    except Exception:
+        _event_loop = None
     # Habilitar el bot de Telegram solo si TELEGRAM_POLLING=1 (por defecto 1 local, 0 en Render)
     if os.getenv("TELEGRAM_POLLING", "1") == "1":
         try:
@@ -231,6 +237,7 @@ def health():
 # WebSocket connections
 _websocket_connections = []
 _websocket_lock = threading.Lock()
+_event_loop: Optional[asyncio.AbstractEventLoop] = None
 
 @app.websocket("/ws/cotizaciones")
 async def websocket_endpoint(websocket: WebSocket):
@@ -317,7 +324,18 @@ def broadcast_to_websockets(message: dict):
             try:
                 # Verificar si la conexión sigue activa
                 if websocket.client_state.value == 1:  # WebSocketState.CONNECTED
-                    asyncio.create_task(websocket.send_text(json.dumps(message)))
+                    try:
+                        # Enviar desde cualquier hilo usando el loop principal
+                        if _event_loop is not None:
+                            asyncio.run_coroutine_threadsafe(
+                                websocket.send_text(json.dumps(message)), _event_loop
+                            )
+                        else:
+                            # Fallback si no hay loop registrado
+                            asyncio.create_task(websocket.send_text(json.dumps(message)))
+                    except Exception as e:
+                        print(f"[websocket] Error programando envío: {e}")
+                        disconnected.append(websocket)
                 else:
                     disconnected.append(websocket)
             except Exception as e:
