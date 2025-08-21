@@ -8,5 +8,15 @@ jobs:
   start:
     runs-on: ubuntu-latest
     steps:
-      - run: curl -fsS https://cotiza-api-q3v6.onrender.com//cotizaciones/health || true
-      - run: curl -fsS -X POST https://cotiza-api-q3v6.onrender.com/m/cotizaciones/iniciar_auto
+      - name: Wake up (health)
+        run: |
+          for i in {1..5}; do
+            curl --fail --silent --show-error --max-time 15 \
+              https://cotiza-api-q3v6.onrender.com/cotizaciones/health && break || sleep 5
+          done
+      - name: Start service (iniciar_auto)
+        run: |
+          curl --fail --silent --show-error --max-time 30 -X POST \
+            -H 'accept: application/json' \
+            -H 'content-type: application/json' \
+            https://cotiza-api-q3v6.onrender.com/cotizaciones/iniciar_auto
