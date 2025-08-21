@@ -1,43 +1,34 @@
-# ratios_worker.py
-# -----------------------------------------------------------------------------
-# Calcula ratios base/quote cada 10s y guarda en public.terminal_ratios_history.
-#
-# Definiciones execution-aware:
-#   bid_ratio = base_bid  / quote_ask   (vender ratio ahora)
-#   ask_ratio = base_ask  / quote_bid   (comprar ratio ahora)
-#
-# z-scores y régimen:
-#   z_bid = (bid_ratio - sma180_mid) / std60_mid
-#   z_ask = (ask_ratio - sma180_mid) / std60_mid
-#   vol_ratio = std60_mid / std180_mid
-#
-# Bandas: ±K·σ (K=1.5 por defecto) para series bid/ask/mid.
-# Lee tamaños del cache: bid_size / offer_size.
-# -----------------------------------------------------------------------------
-
+# ratios_worker.py — con warm-start de ventanas
 import threading
 import time
 import math
 from collections import deque
 from datetime import datetime, timezone
 
-from supabase_client import get_active_pairs, guardar_en_supabase, get_last_ratio_data  # noqa
+from supabase_client import get_active_pairs, guardar_en_supabase  # wrappers
+try:
+    # Necesario para hidratar desde DB
+    from supabase_client import supabase
+except Exception:
+    supabase = None
+
 from quotes_cache import quotes_cache
 
 _worker_thread = None
 _stop_event = threading.Event()
 _session_user = None
 
-# Buffers de ventanas rodantes por par (clave: (base, quote, user))
+# Buffers rodantes por par (clave: (base, quote, user, client))
 _rolling: dict[tuple, dict[str, deque]] = {}
+_hydrated_keys: set[tuple] = set()  # para no re-hidratar
 
-# --------------------------- Parámetros de cálculo ---------------------------
+# --------------------------- Parámetros --------------------------------------
 INTERVAL_SECONDS   = 10
 SMA_WINDOW         = 180   # 180 ticks * 10s ~ 30 min
 STD_SHORT_WINDOW   = 60    # 60 ticks * 10s ~ 10 min
-BAND_K             = 1.5   # Bandas ±K·σ (sobre σ180)
-VERBOSE_FIRST_PAIR = True  # logs extras para el primer par por iteración
-
+BAND_K             = 1.5   # Bandas ±K·σ (σ180)
+WARMSTART_BARS     = 180   # cuántas filas traer para precalcular todo
+VERBOSE_FIRST_PAIR = True
 
 # ------------------------------- Helpers -------------------------------------
 def _is_num(x):
@@ -76,13 +67,10 @@ def _std_last(values: deque, window: int):
     var = sum((x - m)**2 for x in sub) / n
     return math.sqrt(var)
 
-
-# --------------------------------- API ---------------------------------------
 def set_session(user_id: str):
     """Setea un user_id por sesión si no viene en los pares."""
     global _session_user
     _session_user = user_id
-
 
 def obtener_datos_mercado(symbol: str) -> dict | None:
     """Devuelve el dict del cache si hay last/bid/offer; si no, None."""
@@ -93,7 +81,52 @@ def obtener_datos_mercado(symbol: str) -> dict | None:
         return datos
     return None
 
+# --------------------------- Warm-start desde DB -----------------------------
+def _hydrate_from_db(base_symbol: str, quote_symbol: str, user_id: str, client_id: str, key: tuple):
+    """Precarga los últimos WARMSTART_BARS ratios mid/bid/ask desde la tabla."""
+    if supabase is None:
+        print("[warmstart] supabase=None → sin hidratación")
+        return
 
+    try:
+        cols = "asof,mid_ratio,bid_ratio,ask_ratio"
+        q = (
+            supabase.table("terminal_ratios_history")
+            .select(cols)
+            .eq("user_id", user_id)
+            .eq("client_id", client_id)
+            .eq("base_symbol", base_symbol)
+            .eq("quote_symbol", quote_symbol)
+            .order("asof", desc=True)
+            .limit(WARMSTART_BARS)
+        )
+        res = q.execute()
+        rows = (res.data or [])
+        if not rows:
+            print(f"[warmstart] sin historial para {base_symbol}/{quote_symbol}")
+            return
+
+        # Ascendente por asof para no “saltear” en las ventanas
+        rows.sort(key=lambda r: r.get("asof") or "")
+
+        buf = _rolling.get(key)
+        if buf is None:
+            buf = {"mid": deque(maxlen=SMA_WINDOW), "bid": deque(maxlen=SMA_WINDOW), "ask": deque(maxlen=SMA_WINDOW)}
+            _rolling[key] = buf
+
+        added_mid = added_bid = added_ask = 0
+        for r in rows:
+            m = r.get("mid_ratio"); b = r.get("bid_ratio"); a = r.get("ask_ratio")
+            if _is_num(m): buf["mid"].append(float(m)); added_mid += 1
+            if _is_num(b): buf["bid"].append(float(b)); added_bid += 1
+            if _is_num(a): buf["ask"].append(float(a)); added_ask += 1
+
+        _hydrated_keys.add(key)
+        print(f"[warmstart] {base_symbol}/{quote_symbol} ← {added_mid}/{added_bid}/{added_ask} (mid/bid/ask) filas")
+    except Exception as e:
+        print(f"[warmstart] error hidratando {base_symbol}/{quote_symbol}: {e}")
+
+# --------------------------------- Loop --------------------------------------
 def _worker_loop():
     while not _stop_event.is_set():
         try:
@@ -106,6 +139,18 @@ def _worker_loop():
 
                 base_symbol  = pair.get("base_symbol")
                 quote_symbol = pair.get("quote_symbol")
+                user_id      = pair.get("user_id") or _session_user
+                client_id    = pair.get("client_id") or "default"
+
+                if not (base_symbol and quote_symbol and user_id):
+                    print(f"[ratios_worker] ⚠️ par incompleto → {pair}")
+                    continue
+
+                key = (base_symbol, quote_symbol, user_id, client_id)
+
+                # --- Warm-start (una sola vez por par)
+                if key not in _hydrated_keys:
+                    _hydrate_from_db(base_symbol, quote_symbol, user_id, client_id, key)
 
                 base  = obtener_datos_mercado(base_symbol)
                 quote = obtener_datos_mercado(quote_symbol)
@@ -122,7 +167,7 @@ def _worker_loop():
                 A_bid, A_ask, A_last = base.get("bid"), base.get("offer"), base.get("last")
                 B_bid, B_ask, B_last = quote.get("bid"), quote.get("offer"), quote.get("last")
 
-                # --- Tamaños (según nombres que usás en el cache)
+                # --- Tamaños (según cache)
                 A_bid_sz = float(base["bid_size"])   if _is_num(base.get("bid_size"))   else None
                 A_ask_sz = float(base["offer_size"]) if _is_num(base.get("offer_size")) else None
                 B_bid_sz = float(quote["bid_size"])  if _is_num(quote.get("bid_size"))  else None
@@ -132,7 +177,7 @@ def _worker_loop():
                 bid_ratio = _safe_div(A_bid, B_ask) if (_is_num(A_bid) and _is_num(B_ask)) else None
                 ask_ratio = _safe_div(A_ask, B_bid) if (_is_num(A_ask) and _is_num(B_bid)) else None
 
-                # --- mid_ratio (preferentemente con mid; si no hay, usar last)
+                # --- mid_ratio (preferentemente mid; si no hay, last)
                 mid_A = ((float(A_bid)+float(A_ask))/2.0) if (_is_num(A_bid) and _is_num(A_ask)) else (float(A_last) if _is_num(A_last) else None)
                 mid_B = ((float(B_bid)+float(B_ask))/2.0) if (_is_num(B_bid) and _is_num(B_ask)) else (float(B_last) if _is_num(B_last) else None)
                 mid_ratio = _safe_div(mid_A, mid_B)
@@ -141,14 +186,7 @@ def _worker_loop():
                     print(f"[ratios_worker] ❌ No se pudo calcular ningún ratio para {base_symbol}/{quote_symbol}")
                     continue
 
-                # --- Rolling buffers
-                user_id = pair.get("user_id") or _session_user
-                if not user_id:
-                    print(f"[ratios_worker] ⚠️ Sin user_id para {base_symbol}/{quote_symbol}; saltando fila")
-                    continue
-                client_id = pair.get("client_id") or "default"
-
-                key = (base_symbol, quote_symbol, user_id)
+                # --- Buffers del par
                 buf = _rolling.get(key)
                 if buf is None:
                     buf = {"mid": deque(maxlen=SMA_WINDOW), "bid": deque(maxlen=SMA_WINDOW), "ask": deque(maxlen=SMA_WINDOW)}
@@ -172,10 +210,10 @@ def _worker_loop():
                 # --- Bandas ±K·σ
                 bb_bid_upper = (bid_sma180 + BAND_K * bid_std180) if (_is_num(bid_sma180) and _is_num(bid_std180)) else None
                 bb_bid_lower = (bid_sma180 - BAND_K * bid_std180) if (_is_num(bid_sma180) and _is_num(bid_std180)) else None
-                bb_ask_upper = (ask_sma180 + BAND_K * ask_std180) if (_is_num(ask_sma180) and _is_num(ask_std180)) else None
-                bb_ask_lower = (ask_sma180 - BAND_K * ask_std180) if (_is_num(ask_sma180) and _is_num(ask_std180)) else None
                 bb_mid_upper = (mid_sma180 + BAND_K * mid_std180) if (_is_num(mid_sma180) and _is_num(mid_std180)) else None
                 bb_mid_lower = (mid_sma180 - BAND_K * mid_std180) if (_is_num(mid_sma180) and _is_num(mid_std180)) else None
+                bb_ask_upper = (ask_sma180 + BAND_K * ask_std180) if (_is_num(ask_sma180) and _is_num(ask_std180)) else None
+                bb_ask_lower = (ask_sma180 - BAND_K * ask_std180) if (_is_num(ask_sma180) and _is_num(ask_std180)) else None
 
                 # --- z-scores (vs mid)
                 z_bid_val = ((bid_ratio - mid_sma180) / mid_std60) if (_is_num(bid_ratio) and _is_num(mid_sma180) and _is_num(mid_std60) and mid_std60 > 0) else None
@@ -184,7 +222,7 @@ def _worker_loop():
                 # --- vol_ratio (régimen)
                 vol_ratio = (mid_std60 / mid_std180) if (_is_num(mid_std60) and _is_num(mid_std180) and mid_std180 > 0) else None
 
-                # --- spread del ratio (debe ser ≥ 0)
+                # --- spread del ratio
                 ratio_spread = (ask_ratio - bid_ratio) if (_is_num(ask_ratio) and _is_num(bid_ratio)) else None
                 if _is_num(ratio_spread) and ratio_spread < -1e-9:
                     print(f"[ratios_worker][WARN] ratio_spread NEGATIVO en {base_symbol}/{quote_symbol}: {ratio_spread:.6g}")
@@ -208,7 +246,7 @@ def _worker_loop():
                     "offer_price_base": float(A_ask) if _is_num(A_ask) else None,
                     "offer_price_quote":float(B_ask) if _is_num(B_ask) else None,
 
-                    # Tamaños (L1)
+                    # Tamaños
                     "bid_size_base":    A_bid_sz,
                     "bid_size_quote":   B_bid_sz,
                     "offer_size_base":  A_ask_sz,
@@ -218,7 +256,6 @@ def _worker_loop():
                     "sma180_bid":        float(bid_sma180)  if _is_num(bid_sma180)  else None,
                     "sma180_offer":      float(ask_sma180)  if _is_num(ask_sma180)  else None,
                     "sma180_mid":        float(mid_sma180)  if _is_num(mid_sma180)  else None,
-
                     "bb180_bid_upper":   float(bb_bid_upper) if _is_num(bb_bid_upper) else None,
                     "bb180_bid_lower":   float(bb_bid_lower) if _is_num(bb_bid_lower) else None,
                     "bb180_offer_upper": float(bb_ask_upper) if _is_num(bb_ask_upper) else None,
@@ -245,7 +282,7 @@ def _worker_loop():
                     try:
                         result = guardar_en_supabase("terminal_ratios_history", row)
                         if result is None:
-                            print(f"[ratios_worker] ❌ Error al guardar row (None)")
+                            print("[ratios_worker] ❌ Error al guardar row (None)")
                         else:
                             print(f"[ratios_worker] ✅ Guardado {base_symbol}/{quote_symbol} "
                                   f"R_bid={row['bid_ratio']}, R_ask={row['ask_ratio']}, mid={row['mid_ratio']}")
@@ -259,7 +296,7 @@ def _worker_loop():
 
         time.sleep(INTERVAL_SECONDS)
 
-
+# -------------------------------- Control ------------------------------------
 def start():
     global _worker_thread
     if _worker_thread and _worker_thread.is_alive():
@@ -267,8 +304,7 @@ def start():
     _stop_event.clear()
     _worker_thread = threading.Thread(target=_worker_loop, daemon=True)
     _worker_thread.start()
-    print("[ratios_worker] Worker iniciado - procesando todos los pares activos")
-
+    print("[ratios_worker] Worker iniciado - procesando pares activos")
 
 def stop():
     _stop_event.set()
