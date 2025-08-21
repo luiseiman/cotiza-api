@@ -1,10 +1,27 @@
+# ratios_worker.py
+# -----------------------------------------------------------------------------
+# Calcula ratios base/quote cada 10s y guarda en public.terminal_ratios_history.
+#
+# Definiciones execution-aware:
+#   bid_ratio = base_bid  / quote_ask   (vender ratio ahora)
+#   ask_ratio = base_ask  / quote_bid   (comprar ratio ahora)
+#
+# z-scores y régimen:
+#   z_bid = (bid_ratio - sma180_mid) / std60_mid
+#   z_ask = (ask_ratio - sma180_mid) / std60_mid
+#   vol_ratio = std60_mid / std180_mid
+#
+# Bandas: ±K·σ (K=1.5 por defecto) para series bid/ask/mid.
+# Lee tamaños del cache: bid_size / offer_size.
+# -----------------------------------------------------------------------------
+
 import threading
 import time
 import math
 from collections import deque
 from datetime import datetime, timezone
 
-from supabase_client import get_active_pairs, guardar_en_supabase, get_last_ratio_data
+from supabase_client import get_active_pairs, guardar_en_supabase, get_last_ratio_data  # noqa
 from quotes_cache import quotes_cache
 
 _worker_thread = None
@@ -12,18 +29,17 @@ _stop_event = threading.Event()
 _session_user = None
 
 # Buffers de ventanas rodantes por par (clave: (base, quote, user))
-_rolling = {}
+_rolling: dict[tuple, dict[str, deque]] = {}
 
 # --------------------------- Parámetros de cálculo ---------------------------
 INTERVAL_SECONDS   = 10
 SMA_WINDOW         = 180   # 180 ticks * 10s ~ 30 min
 STD_SHORT_WINDOW   = 60    # 60 ticks * 10s ~ 10 min
 BAND_K             = 1.5   # Bandas ±K·σ (sobre σ180)
+VERBOSE_FIRST_PAIR = True  # logs extras para el primer par por iteración
 
-VERBOSE_FIRST_PAIR = True  # logs extras en el primer par de cada iteración
 
-
-# ------------------------------- Helpers numéricos ---------------------------
+# ------------------------------- Helpers -------------------------------------
 def _is_num(x):
     try:
         return x is not None and float(x) == float(x)
@@ -43,13 +59,13 @@ def _sma_last(values: deque, window: int):
     if not values:
         return None
     n = min(len(values), window)
-    if n == 0:
+    if n <= 0:
         return None
     sub = list(values)[-n:]
     return sum(sub) / n
 
 def _std_last(values: deque, window: int):
-    """σ poblacional (ddof=0). Devuelve None si no hay ≥2 datos."""
+    """σ poblacional (ddof=0); None si no hay ≥2 datos."""
     if not values:
         return None
     sub = list(values)[-min(len(values), window):]
@@ -57,12 +73,13 @@ def _std_last(values: deque, window: int):
     if n < 2:
         return None
     m = sum(sub) / n
-    var = sum((x - m) ** 2 for x in sub) / n
+    var = sum((x - m)**2 for x in sub) / n
     return math.sqrt(var)
 
 
-# --------------------------------- API pública --------------------------------
+# --------------------------------- API ---------------------------------------
 def set_session(user_id: str):
+    """Setea un user_id por sesión si no viene en los pares."""
     global _session_user
     _session_user = user_id
 
@@ -84,12 +101,12 @@ def _worker_loop():
             print(f"[ratios_worker] pares activos={len(pairs)}")
 
             for i, pair in enumerate(pairs):
-                # ---- Logs de depuración (solo primer par por iteración)
                 if VERBOSE_FIRST_PAIR and i == 0:
                     print(f"[ratios_worker] keys par[0]: {list(pair.keys())}")
 
                 base_symbol  = pair.get("base_symbol")
                 quote_symbol = pair.get("quote_symbol")
+
                 base  = obtener_datos_mercado(base_symbol)
                 quote = obtener_datos_mercado(quote_symbol)
 
@@ -98,36 +115,40 @@ def _worker_loop():
                     print(f"[ratios_worker] {quote_symbol} => {quote}")
 
                 if not base or not quote:
-                    print(f"[ratios_worker] ❌ No hay datos para {base_symbol} / {quote_symbol}")
+                    print(f"[ratios_worker] ❌ No hay datos para {base_symbol}/{quote_symbol}")
                     continue
 
-                # ------ Extraer lados
-                A_bid   = base.get("bid")
-                A_ask   = base.get("offer")
-                A_last  = base.get("last")
+                # --- Precios L1
+                A_bid, A_ask, A_last = base.get("bid"), base.get("offer"), base.get("last")
+                B_bid, B_ask, B_last = quote.get("bid"), quote.get("offer"), quote.get("last")
 
-                B_bid   = quote.get("bid")
-                B_ask   = quote.get("offer")
-                B_last  = quote.get("last")
+                # --- Tamaños (según nombres que usás en el cache)
+                A_bid_sz = float(base["bid_size"])   if _is_num(base.get("bid_size"))   else None
+                A_ask_sz = float(base["offer_size"]) if _is_num(base.get("offer_size")) else None
+                B_bid_sz = float(quote["bid_size"])  if _is_num(quote.get("bid_size"))  else None
+                B_ask_sz = float(quote["offer_size"])if _is_num(quote.get("offer_size"))else None
 
-                # ------ Ratios execution-aware
-                # SELL ratio ahora: vendés A al bid y comprás B al ask
+                # --- Ratios execution-aware
                 bid_ratio = _safe_div(A_bid, B_ask) if (_is_num(A_bid) and _is_num(B_ask)) else None
-                # BUY ratio ahora: comprás A al ask y vendés B al bid
                 ask_ratio = _safe_div(A_ask, B_bid) if (_is_num(A_ask) and _is_num(B_bid)) else None
 
-                # ------ mid_ratio preferente: mid = (bid+ask)/2; si no hay, fallback a last
-                mid_A = ((float(A_bid) + float(A_ask)) / 2.0) if (_is_num(A_bid) and _is_num(A_ask)) else (float(A_last) if _is_num(A_last) else None)
-                mid_B = ((float(B_bid) + float(B_ask)) / 2.0) if (_is_num(B_bid) and _is_num(B_ask)) else (float(B_last) if _is_num(B_last) else None)
+                # --- mid_ratio (preferentemente con mid; si no hay, usar last)
+                mid_A = ((float(A_bid)+float(A_ask))/2.0) if (_is_num(A_bid) and _is_num(A_ask)) else (float(A_last) if _is_num(A_last) else None)
+                mid_B = ((float(B_bid)+float(B_ask))/2.0) if (_is_num(B_bid) and _is_num(B_ask)) else (float(B_last) if _is_num(B_last) else None)
                 mid_ratio = _safe_div(mid_A, mid_B)
 
                 if not any(x is not None for x in (mid_ratio, bid_ratio, ask_ratio)):
                     print(f"[ratios_worker] ❌ No se pudo calcular ningún ratio para {base_symbol}/{quote_symbol}")
                     continue
 
-                # ------ Rolling buffers
-                user_id_key = pair.get("user_id") or pair.get("client_id") or _session_user or "default"
-                key = (base_symbol, quote_symbol, user_id_key)
+                # --- Rolling buffers
+                user_id = pair.get("user_id") or _session_user
+                if not user_id:
+                    print(f"[ratios_worker] ⚠️ Sin user_id para {base_symbol}/{quote_symbol}; saltando fila")
+                    continue
+                client_id = pair.get("client_id") or "default"
+
+                key = (base_symbol, quote_symbol, user_id)
                 buf = _rolling.get(key)
                 if buf is None:
                     buf = {"mid": deque(maxlen=SMA_WINDOW), "bid": deque(maxlen=SMA_WINDOW), "ask": deque(maxlen=SMA_WINDOW)}
@@ -137,7 +158,7 @@ def _worker_loop():
                 if bid_ratio is not None: buf["bid"].append(bid_ratio)
                 if ask_ratio is not None: buf["ask"].append(ask_ratio)
 
-                # ------ Indicadores (mid para z/vol; bid/ask para bandas de ejecución)
+                # --- Indicadores (mid para z/vol; bid/ask para bandas de ejecución)
                 mid_sma180  = _sma_last(buf["mid"], SMA_WINDOW)
                 mid_std60   = _std_last(buf["mid"], STD_SHORT_WINDOW)
                 mid_std180  = _std_last(buf["mid"], SMA_WINDOW)
@@ -148,7 +169,7 @@ def _worker_loop():
                 ask_sma180  = _sma_last(buf["ask"], SMA_WINDOW)
                 ask_std180  = _std_last(buf["ask"], SMA_WINDOW)
 
-                # ------ Bandas ±K·σ (K=1.5 por default)
+                # --- Bandas ±K·σ
                 bb_bid_upper = (bid_sma180 + BAND_K * bid_std180) if (_is_num(bid_sma180) and _is_num(bid_std180)) else None
                 bb_bid_lower = (bid_sma180 - BAND_K * bid_std180) if (_is_num(bid_sma180) and _is_num(bid_std180)) else None
                 bb_ask_upper = (ask_sma180 + BAND_K * ask_std180) if (_is_num(ask_sma180) and _is_num(ask_std180)) else None
@@ -156,45 +177,44 @@ def _worker_loop():
                 bb_mid_upper = (mid_sma180 + BAND_K * mid_std180) if (_is_num(mid_sma180) and _is_num(mid_std180)) else None
                 bb_mid_lower = (mid_sma180 - BAND_K * mid_std180) if (_is_num(mid_sma180) and _is_num(mid_std180)) else None
 
-                # ------ z-scores (vs mid: SMA180_mid / σ60_mid)
+                # --- z-scores (vs mid)
                 z_bid_val = ((bid_ratio - mid_sma180) / mid_std60) if (_is_num(bid_ratio) and _is_num(mid_sma180) and _is_num(mid_std60) and mid_std60 > 0) else None
                 z_ask_val = ((ask_ratio - mid_sma180) / mid_std60) if (_is_num(ask_ratio) and _is_num(mid_sma180) and _is_num(mid_std60) and mid_std60 > 0) else None
 
-                # ------ vol_ratio (régimen)
+                # --- vol_ratio (régimen)
                 vol_ratio = (mid_std60 / mid_std180) if (_is_num(mid_std60) and _is_num(mid_std180) and mid_std180 > 0) else None
 
-                # ------ spread del ratio (debe ser ≥ 0)
+                # --- spread del ratio (debe ser ≥ 0)
                 ratio_spread = (ask_ratio - bid_ratio) if (_is_num(ask_ratio) and _is_num(bid_ratio)) else None
                 if _is_num(ratio_spread) and ratio_spread < -1e-9:
-                    print(f"[ratios_worker][WARN] ratio_spread NEGATIVO en {base_symbol}/{quote_symbol}: {ratio_spread:.6g} (revisar lados)")
+                    print(f"[ratios_worker][WARN] ratio_spread NEGATIVO en {base_symbol}/{quote_symbol}: {ratio_spread:.6g}")
 
-                # (Opcional) datos históricos SOLO para campos no críticos en frío de arranque
-                historical_data = get_last_ratio_data(base_symbol, quote_symbol, pair.get("user_id")) or {}
-
-                # ------ Construcción de row
-                asof_utc = datetime.now(timezone.utc).isoformat()
-                user_id  = user_id_key
-                client_id = pair.get("client_id", user_id)
-
+                # --- Construir row
                 row = {
-                    "user_id": user_id,
-                    "client_id": client_id,
-                    "base_symbol": base_symbol,
-                    "quote_symbol": quote_symbol,
-                    "asof": asof_utc,
+                    "user_id":        user_id,
+                    "client_id":      client_id,
+                    "base_symbol":    base_symbol,
+                    "quote_symbol":   quote_symbol,
+                    "asof":           datetime.now(timezone.utc).isoformat(),
 
                     # Ratios
-                    "mid_ratio":   float(mid_ratio) if _is_num(mid_ratio) else None,
-                    "bid_ratio":   float(bid_ratio) if _is_num(bid_ratio) else None,
-                    "ask_ratio":   float(ask_ratio) if _is_num(ask_ratio) else None,
+                    "mid_ratio":      float(mid_ratio)   if _is_num(mid_ratio)   else None,
+                    "bid_ratio":      float(bid_ratio)   if _is_num(bid_ratio)   else None,
+                    "ask_ratio":      float(ask_ratio)   if _is_num(ask_ratio)   else None,
 
-                    # Precios crudos (auditoría)
-                    "bid_price_base":   float(A_bid)  if _is_num(A_bid)  else None,
-                    "bid_price_quote":  float(B_bid)  if _is_num(B_bid)  else None,
-                    "offer_price_base": float(A_ask)  if _is_num(A_ask)  else None,
-                    "offer_price_quote":float(B_ask)  if _is_num(B_ask)  else None,
+                    # Precios crudos
+                    "bid_price_base":   float(A_bid) if _is_num(A_bid) else None,
+                    "bid_price_quote":  float(B_bid) if _is_num(B_bid) else None,
+                    "offer_price_base": float(A_ask) if _is_num(A_ask) else None,
+                    "offer_price_quote":float(B_ask) if _is_num(B_ask) else None,
 
-                    # SMA / Bandas (bid/ask/mid)
+                    # Tamaños (L1)
+                    "bid_size_base":    A_bid_sz,
+                    "bid_size_quote":   B_bid_sz,
+                    "offer_size_base":  A_ask_sz,
+                    "offer_size_quote": B_ask_sz,
+
+                    # SMA / Bandas
                     "sma180_bid":        float(bid_sma180)  if _is_num(bid_sma180)  else None,
                     "sma180_offer":      float(ask_sma180)  if _is_num(ask_sma180)  else None,
                     "sma180_mid":        float(mid_sma180)  if _is_num(mid_sma180)  else None,
@@ -206,7 +226,7 @@ def _worker_loop():
                     "bb180_mid_upper":   float(bb_mid_upper) if _is_num(bb_mid_upper) else None,
                     "bb180_mid_lower":   float(bb_mid_lower) if _is_num(bb_mid_lower) else None,
 
-                    # Volatilidades y z (mid framework)
+                    # Volatilidades / z / spread / régimen
                     "std60_mid":         float(mid_std60)   if _is_num(mid_std60)   else None,
                     "std180_mid":        float(mid_std180)  if _is_num(mid_std180)  else None,
                     "z_bid":             float(z_bid_val)   if _is_num(z_bid_val)   else None,
@@ -215,8 +235,13 @@ def _worker_loop():
                     "vol_ratio":         float(vol_ratio)   if _is_num(vol_ratio)   else None,
                 }
 
-                # ------ Guardar (si hay al menos algún ratio)
-                if any(x is not None for x in (row["mid_ratio"], row["bid_ratio"], row["ask_ratio"])):
+                if VERBOSE_FIRST_PAIR and i == 0:
+                    print("[sizes-debug]",
+                          base_symbol, {"bid": row["bid_size_base"], "ask": row["offer_size_base"]},
+                          "|", quote_symbol, {"bid": row["bid_size_quote"], "ask": row["offer_size_quote"]})
+
+                # --- Guardar (si hay algún ratio)
+                if any(row[k] is not None for k in ("mid_ratio","bid_ratio","ask_ratio")):
                     try:
                         result = guardar_en_supabase("terminal_ratios_history", row)
                         if result is None:
