@@ -332,6 +332,19 @@ def broadcast_to_websockets(message: dict):
                     _websocket_connections.remove(ws)
         print(f"[websocket] {len(disconnected)} conexiones desconectadas removidas")
 
+# Registrar callback para difundir ticks provenientes de ws_rofex
+def _tick_broadcast_callback(tick: dict):
+    try:
+        # Enviar a todos los clientes conectados
+        broadcast_to_websockets(tick)
+    except Exception as e:
+        print(f"[websocket] error enviando tick: {e}")
+
+try:
+    ws_rofex.set_broadcast_callback(_tick_broadcast_callback)
+except Exception as e:
+    print(f"[main] No se pudo registrar broadcast_callback: {e}")
+
 
 @app.get("/cotizaciones/websocket_status")
 def websocket_status():

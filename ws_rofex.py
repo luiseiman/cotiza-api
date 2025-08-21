@@ -49,6 +49,14 @@ try:
 except Exception:
     print(f"{PRINT_PREFIX} supabase_client.guardar_en_supabase no disponible; no se guardarán ticks en DB.")
 
+# Callback opcional para difundir ticks a otros componentes (p.ej. WebSocket HTTP)
+_broadcast_callback = None  # type: Optional[callable]
+
+def set_broadcast_callback(callback):
+    """Registra un callback que reciba un dict con el tick y lo difunda."""
+    global _broadcast_callback
+    _broadcast_callback = callback
+
 def _first_price_and_size(levels: Any) -> Tuple[Optional[float], Optional[float]]:
     if not levels:
         return None, None
@@ -223,6 +231,26 @@ class MarketDataManager:
             "last": last_p, "last_size": last_sz,
             "timestamp": ts_ms,
         }
+
+        # Construir payload de tick estandarizado para difusión
+        tick = {
+            "type": "tick",
+            "symbol": symbol,
+            "bid": bid_p,
+            "bid_size": bid_sz,
+            "offer": ask_p,
+            "offer_size": ask_sz,
+            "last": last_p,
+            "last_size": last_sz,
+            "ts_ms": ts_ms,
+        }
+
+        # Difundir a clientes internos (si hay callback registrado)
+        try:
+            if _broadcast_callback:
+                _broadcast_callback(tick)
+        except Exception as e:
+            print(f"{PRINT_PREFIX} error broadcast tick: {e}")
         if _guardar_tick:
             try:
                 # Solo guardar si la tabla existe y hay datos válidos
