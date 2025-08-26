@@ -7,6 +7,11 @@ from datetime import datetime, timezone
 
 from supabase_client import get_active_pairs, guardar_en_supabase  # wrappers
 try:
+    from strategy_engine import evaluateAndAlert as _evaluate_and_alert
+except Exception:
+    def _evaluate_and_alert(**kwargs):
+        return 0
+try:
     # Necesario para hidratar desde DB
     from supabase_client import supabase
 except Exception:
@@ -290,6 +295,32 @@ def _worker_loop():
                         print(f"[ratios_worker] error guardando ratio: {e}")
                 else:
                     print(f"[ratios_worker] ⚠️ No hay ratios válidos para guardar en {base_symbol}/{quote_symbol}")
+
+                # --- Evaluar reglas y notificar (Telegram) si matchean
+                try:
+                    snapshot = {
+                        "base": base,
+                        "quote": quote,
+                        "ratios": {
+                            "mid": mid_ratio,
+                            "bid": bid_ratio,
+                            "ask": ask_ratio,
+                            "sma180_mid": mid_sma180,
+                            "std60_mid": mid_std60,
+                            "std180_mid": mid_std180,
+                        }
+                    }
+                    matched = _evaluate_and_alert(
+                        user_id=str(user_id),
+                        client_id=str(client_id),
+                        base_symbol=str(base_symbol),
+                        quote_symbol=str(quote_symbol),
+                        snapshot=snapshot,
+                    )
+                    if matched:
+                        print(f"[ratios_worker] 🔔 {matched} regla(s) cumplida(s) para {base_symbol}/{quote_symbol}")
+                except Exception as e:
+                    print(f"[ratios_worker] error evaluando alertas: {e}")
 
         except Exception as e:
             print(f"[ratios_worker] error en loop: {e}")
