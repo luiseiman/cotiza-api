@@ -112,6 +112,8 @@ class MarketDataManager:
         self._subscribed: set[str] = set()
         self.last_marketdata_at_ms: Optional[int] = None
         self._last_params: Optional[Dict[str, Any]] = None
+        # Order reports buffer
+        self._last_order_report: Optional[Dict[str, Any]] = None
 
     def start(
         self,
@@ -154,7 +156,7 @@ class MarketDataManager:
             try:
                 self._pyrofex.init_websocket_connection(
                     market_data_handler=md_handler,
-                    order_report_handler=lambda m: None,
+                    order_report_handler=self._handle_or,
                     error_handler=lambda e: print(f"{PRINT_PREFIX} WS error: {e}")
                 )
                 self._ws_open = True
@@ -197,6 +199,7 @@ class MarketDataManager:
                 "subscribed": sorted(self._subscribed),
                 "last_md_ms": self.last_marketdata_at_ms,
                 "subscribers": broadcaster.subscribers(),
+                "last_order_report": self._last_order_report,
             }
 
     def _subscribe_many(self, instrumentos: Iterable[str]):
@@ -275,4 +278,86 @@ class MarketDataManager:
                 # Desactivar guardado en caso de error
                 _guardar_tick = None
 
+    def _handle_or(self, message: Dict[str, Any]):
+        """Order Report handler: guarda último reporte."""
+        try:
+            with self._lock:
+                self._last_order_report = message
+        except Exception:
+            pass
+
+    def subscribe_order_reports(self, account: str) -> Dict[str, Any]:
+        with self._lock:
+            if not self._pyrofex or not self._ws_open:
+                return {"status": "error", "message": "ws_not_connected"}
+            try:
+                # Mejor esfuerzo: primero 'account', luego 'accounts=[...]'
+                try:
+                    self._pyrofex.order_report_subscription(account=account)
+                except Exception:
+                    self._pyrofex.order_report_subscription(accounts=[account])
+                return {"status": "ok"}
+            except Exception as e:
+                return {"status": "error", "message": str(e)}
+
+    def send_order(self, *, symbol: str, side: str, size: float, price: Optional[float] = None,
+                   order_type: str = "LIMIT", tif: str = "DAY", market: Optional[str] = None) -> Dict[str, Any]:
+        with self._lock:
+            if not self._pyrofex or not self._ws_open:
+                return {"status": "error", "message": "ws_not_connected"}
+            try:
+                pr = self._pyrofex
+                # Mapear enums
+                _side = pr.Side.BUY if str(side).upper() in ("BUY", "B") else pr.Side.SELL
+                _otype = pr.OrderType.LIMIT if str(order_type).upper() == "LIMIT" else pr.OrderType.MARKET
+                # Tiempo en vigor si existe
+                tif_arg = None
+                try:
+                    tif_map = {
+                        "DAY": getattr(pr, "TimeInForce").DAY,
+                        "IOC": getattr(pr, "TimeInForce").IMMEDIATE_OR_CANCEL if hasattr(getattr(pr, "TimeInForce"), "IMMEDIATE_OR_CANCEL") else getattr(pr, "TimeInForce").IOC,
+                        "FOK": getattr(pr, "TimeInForce").FILL_OR_KILL if hasattr(getattr(pr, "TimeInForce"), "FILL_OR_KILL") else getattr(pr, "TimeInForce").FOK,
+                    }
+                    tif_arg = tif_map.get(str(tif).upper(), getattr(pr, "TimeInForce").DAY)
+                except Exception:
+                    tif_arg = None
+
+                kwargs = {
+                    "ticker": symbol,
+                    "side": _side,
+                    "size": float(size),
+                    "order_type": _otype,
+                }
+                if price is not None:
+                    kwargs["price"] = float(price)
+                if tif_arg is not None:
+                    kwargs["time_in_force"] = tif_arg
+                if market:
+                    # Intentar mapear a enum de Market si existe
+                    try:
+                        m = None
+                        if hasattr(pr, "Market"):
+                            # Coincidencia directa
+                            m = getattr(pr.Market, str(market).upper(), None)
+                            # Alias comunes
+                            if m is None and str(market).upper() == "ROFX" and hasattr(pr.Market, "ROFEX"):
+                                m = getattr(pr.Market, "ROFEX")
+                            if m is None and str(market).upper() == "MERV" and hasattr(pr.Market, "MERV"):
+                                m = getattr(pr.Market, "MERV")
+                        if m is not None:
+                            kwargs["market"] = m
+                        else:
+                            # Si no hay enum, enviar string solo si la lib lo acepta
+                            kwargs["market"] = str(market)
+                    except Exception:
+                        kwargs["market"] = str(market)
+
+                res = pr.send_order_via_websocket(**kwargs)
+                return {"status": "ok", "response": res}
+            except Exception as e:
+                return {"status": "error", "message": str(e)}
+
+    def last_order_report(self) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            return self._last_order_report
 manager = MarketDataManager()

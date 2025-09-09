@@ -77,6 +77,18 @@ class IniciarRequest(BaseModel):
     account: str
     instrumentos: List[str]
 
+class OrderSubscribeRequest(BaseModel):
+    account: str
+
+class SendOrderRequest(BaseModel):
+    symbol: str
+    side: str  # BUY/SELL
+    size: float
+    price: float | None = None
+    order_type: str = "LIMIT"  # LIMIT/MARKET
+    tif: str = "DAY"           # DAY/IOC/FOK (si aplica)
+    market: str | None = None
+
 @app.on_event("startup")
 def _startup():
     print("[main] startup")
@@ -202,6 +214,38 @@ def reiniciar():
     except Exception as e:
         print(f"[main] Error al reiniciar: {e}")
         return {"status": "error", "message": f"Error al reiniciar: {str(e)}"}
+
+@app.post("/cotizaciones/orders/subscribe")
+def orders_subscribe(req: OrderSubscribeRequest):
+    try:
+        res = ws_rofex.manager.subscribe_order_reports(account=req.account)
+        return res
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.post("/cotizaciones/orders/send")
+def orders_send(req: SendOrderRequest):
+    try:
+        res = ws_rofex.manager.send_order(
+            symbol=req.symbol,
+            side=req.side,
+            size=req.size,
+            price=req.price,
+            order_type=req.order_type,
+            tif=req.tif,
+            market=req.market,
+        )
+        return res
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.get("/cotizaciones/orders/last_report")
+def orders_last_report():
+    try:
+        rep = ws_rofex.manager.last_order_report()
+        return {"status": "ok", "report": rep}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @app.get("/cotizaciones/status")
 def estado():
