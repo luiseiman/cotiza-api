@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Body, WebSocket, WebSocketDisconnect, HTTPException, status
+from fastapi import FastAPI, Body, WebSocket, WebSocketDisconnect, HTTPException, status, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import ws_rofex
@@ -42,6 +42,21 @@ _service_status = {
     "ws_connected": False
 }
 _status_lock = threading.Lock()
+
+# ---------------------------- Order tracing (in-memory) ----------------------------
+_order_logs: list[dict] = []
+_order_logs_lock = threading.Lock()
+
+def _append_order_log(entry: dict):
+    try:
+        entry["ts"] = time.time()
+        with _order_logs_lock:
+            _order_logs.append(entry)
+            # Limitar tamaño para no crecer indefinidamente
+            if len(_order_logs) > 500:
+                del _order_logs[: len(_order_logs) - 500]
+    except Exception:
+        pass
 
 def _update_status(**kwargs):
     """Actualiza el estado del servicio de forma thread-safe"""
@@ -218,14 +233,18 @@ def reiniciar():
 @app.post("/cotizaciones/orders/subscribe")
 def orders_subscribe(req: OrderSubscribeRequest):
     try:
+        _append_order_log({"endpoint": "subscribe", "request": req.model_dump()})
         res = ws_rofex.manager.subscribe_order_reports(account=req.account)
+        _append_order_log({"endpoint": "subscribe", "response": res})
         return res
     except Exception as e:
+        _append_order_log({"endpoint": "subscribe", "error": str(e)})
         return {"status": "error", "message": str(e)}
 
 @app.post("/cotizaciones/orders/send")
 def orders_send(req: SendOrderRequest):
     try:
+        _append_order_log({"endpoint": "send", "request": req.model_dump()})
         res = ws_rofex.manager.send_order(
             symbol=req.symbol,
             side=req.side,
@@ -235,15 +254,29 @@ def orders_send(req: SendOrderRequest):
             tif=req.tif,
             market=req.market,
         )
+        _append_order_log({"endpoint": "send", "response": res})
         return res
     except Exception as e:
+        _append_order_log({"endpoint": "send", "error": str(e)})
         return {"status": "error", "message": str(e)}
 
 @app.get("/cotizaciones/orders/last_report")
 def orders_last_report():
     try:
         rep = ws_rofex.manager.last_order_report()
-        return {"status": "ok", "report": rep}
+        res = {"status": "ok", "report": rep}
+        _append_order_log({"endpoint": "last_report", "response": res})
+        return res
+    except Exception as e:
+        _append_order_log({"endpoint": "last_report", "error": str(e)})
+        return {"status": "error", "message": str(e)}
+
+@app.get("/cotizaciones/orders/logs")
+def orders_logs(limit: int = 100):
+    try:
+        with _order_logs_lock:
+            data = _order_logs[-limit:]
+        return {"status": "ok", "count": len(data), "logs": data}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
