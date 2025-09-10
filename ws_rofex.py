@@ -283,6 +283,15 @@ class MarketDataManager:
         try:
             with self._lock:
                 self._last_order_report = message
+            # Difundir order report a interesados (vía callback genérico)
+            try:
+                if _broadcast_callback:
+                    _broadcast_callback({
+                        "type": "order_report",
+                        "report": message
+                    })
+            except Exception as e:
+                print(f"{PRINT_PREFIX} error broadcast order_report: {e}")
         except Exception:
             pass
 

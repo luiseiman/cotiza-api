@@ -358,6 +358,40 @@ async def websocket_endpoint(websocket: WebSocket):
                             "instruments": message.get("instruments", []),
                             "timestamp": time.time()
                         }))
+                    elif message.get("type") == "orders_subscribe":
+                        # Suscribir a order reports de una cuenta
+                        account = message.get("account")
+                        if not account:
+                            await websocket.send_text(json.dumps({
+                                "type": "error", "message": "missing account"
+                            }))
+                        else:
+                            res = ws_rofex.manager.subscribe_order_reports(account=account)
+                            await websocket.send_text(json.dumps({
+                                "type": "orders_subscribed", "account": account, "result": res
+                            }))
+                    elif message.get("type") == "send_order":
+                        # Envío de orden directa
+                        payload = message.get("order") or {}
+                        try:
+                            res = ws_rofex.manager.send_order(
+                                symbol=payload.get("symbol"),
+                                side=payload.get("side"),
+                                size=payload.get("size"),
+                                price=payload.get("price"),
+                                order_type=payload.get("order_type", "LIMIT"),
+                                tif=payload.get("tif", "DAY"),
+                                market=payload.get("market"),
+                            )
+                            await websocket.send_text(json.dumps({
+                                "type": "order_ack",
+                                "request": payload,
+                                "result": res
+                            }))
+                        except Exception as e:
+                            await websocket.send_text(json.dumps({
+                                "type": "error", "message": f"send_order failed: {str(e)}"
+                            }))
                     else:
                         await websocket.send_text(json.dumps({
                             "type": "error",
