@@ -352,26 +352,20 @@ class MarketDataManager:
                 if tif_arg is not None:
                     kwargs["time_in_force"] = tif_arg
                 if client_order_id is not None:
-                    # Intentar diferentes nombres de campo que pyRofex pueda aceptar
+                    # Usar directamente ws_client_order_id (campo correcto del broker)
                     try:
-                        # Primero intentar con ws_client_order_id (campo correcto del broker)
-                        if hasattr(pr, 'ws_client_order_id'):
-                            kwargs["ws_client_order_id"] = str(client_order_id)
-                        # Luego con wsClOrdId (campo real del broker)
-                        elif hasattr(pr, 'wsClOrdId'):
+                        kwargs["ws_client_order_id"] = str(client_order_id)
+                        print(f"{PRINT_PREFIX} Enviando orden con ws_client_order_id: {client_order_id}")
+                    except Exception as e:
+                        print(f"{PRINT_PREFIX} Error con ws_client_order_id: {e}")
+                        # Fallback a otros campos
+                        try:
                             kwargs["wsClOrdId"] = str(client_order_id)
-                        # Luego con clientId (más común)
-                        elif hasattr(pr, 'clientId'):
-                            kwargs["clientId"] = str(client_order_id)
-                        # Luego con clOrdId (estándar FIX)
-                        elif hasattr(pr, 'clOrdId'):
-                            kwargs["clOrdId"] = str(client_order_id)
-                        # Finalmente con client_order_id genérico
-                        else:
+                            print(f"{PRINT_PREFIX} Fallback a wsClOrdId: {client_order_id}")
+                        except Exception as e2:
+                            print(f"{PRINT_PREFIX} Error con wsClOrdId: {e2}")
                             kwargs["client_order_id"] = str(client_order_id)
-                    except Exception:
-                        # Si falla, agregar como campo genérico
-                        kwargs["client_order_id"] = str(client_order_id)
+                            print(f"{PRINT_PREFIX} Fallback a client_order_id: {client_order_id}")
                 if market:
                     # Intentar mapear a enum de Market si existe
                     try:
