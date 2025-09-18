@@ -310,7 +310,8 @@ class MarketDataManager:
                 return {"status": "error", "message": str(e)}
 
     def send_order(self, *, symbol: str, side: str, size: float, price: Optional[float] = None,
-                   order_type: str = "LIMIT", tif: str = "DAY", market: Optional[str] = None) -> Dict[str, Any]:
+                   order_type: str = "LIMIT", tif: str = "DAY", market: Optional[str] = None, 
+                   client_order_id: Optional[str] = None) -> Dict[str, Any]:
         with self._lock:
             if not self._pyrofex or not self._ws_open:
                 return {"status": "error", "message": "ws_not_connected"}
@@ -341,6 +342,21 @@ class MarketDataManager:
                     kwargs["price"] = float(price)
                 if tif_arg is not None:
                     kwargs["time_in_force"] = tif_arg
+                if client_order_id is not None:
+                    # Intentar diferentes nombres de campo que pyRofex pueda aceptar
+                    try:
+                        # Primero intentar con clientId (más común)
+                        if hasattr(pr, 'clientId'):
+                            kwargs["clientId"] = str(client_order_id)
+                        # Luego con clOrdId (estándar FIX)
+                        elif hasattr(pr, 'clOrdId'):
+                            kwargs["clOrdId"] = str(client_order_id)
+                        # Finalmente con client_order_id genérico
+                        else:
+                            kwargs["client_order_id"] = str(client_order_id)
+                    except Exception:
+                        # Si falla, agregar como campo genérico
+                        kwargs["client_order_id"] = str(client_order_id)
                 if market:
                     # Intentar mapear a enum de Market si existe
                     try:

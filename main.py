@@ -103,6 +103,7 @@ class SendOrderRequest(BaseModel):
     order_type: str = "LIMIT"  # LIMIT/MARKET
     tif: str = "DAY"           # DAY/IOC/FOK (si aplica)
     market: str | None = None
+    client_order_id: str | None = None  # ID único del cliente para tracking
 
 @app.on_event("startup")
 def _startup():
@@ -253,6 +254,7 @@ def orders_send(req: SendOrderRequest):
             order_type=req.order_type,
             tif=req.tif,
             market=req.market,
+            client_order_id=req.client_order_id,
         )
         _append_order_log({"endpoint": "send", "response": res})
         return res
@@ -373,6 +375,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     elif message.get("type") == "send_order":
                         # Envío de orden directa
                         payload = message.get("order") or {}
+                        client_order_id = message.get("clOrdId") or payload.get("client_order_id")
                         try:
                             res = ws_rofex.manager.send_order(
                                 symbol=payload.get("symbol"),
@@ -382,6 +385,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                 order_type=payload.get("order_type", "LIMIT"),
                                 tif=payload.get("tif", "DAY"),
                                 market=payload.get("market"),
+                                client_order_id=client_order_id,
                             )
                             await websocket.send_text(json.dumps({
                                 "type": "order_ack",
