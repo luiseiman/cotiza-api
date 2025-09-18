@@ -1,0 +1,364 @@
+{
+  "websocket_messages": {
+    "connection": {
+      "description": "Mensajes de conexión y mantenimiento",
+      "messages": {
+        "connection": {
+          "direction": "server → client",
+          "description": "Mensaje de bienvenida al conectar",
+          "format": {
+            "type": "connection",
+            "status": "connected",
+            "timestamp": 1642248600.0,
+            "message": "Conexión WebSocket establecida"
+          }
+        },
+        "ping": {
+          "direction": "client → server",
+          "description": "Mensaje de ping para mantener conexión",
+          "format": {
+            "type": "ping",
+            "timestamp": 1642248600.0
+          }
+        },
+        "pong": {
+          "direction": "server → client",
+          "description": "Respuesta a ping",
+          "format": {
+            "type": "pong",
+            "timestamp": 1642248600.0
+          }
+        }
+      }
+    },
+    "subscription": {
+      "description": "Mensajes de suscripción a datos",
+      "messages": {
+        "subscribe": {
+          "direction": "client → server",
+          "description": "Suscribirse a cotizaciones",
+          "format": {
+            "type": "subscribe",
+            "instruments": ["GGAL", "PAMP", "ALUA"]
+          }
+        },
+        "subscribed": {
+          "direction": "server → client",
+          "description": "Confirmación de suscripción a cotizaciones",
+          "format": {
+            "type": "subscribed",
+            "instruments": ["GGAL", "PAMP", "ALUA"],
+            "timestamp": 1642248600.0
+          }
+        },
+        "orders_subscribe": {
+          "direction": "client → server",
+          "description": "Suscribirse a order reports",
+          "format": {
+            "type": "orders_subscribe",
+            "account": "mi_cuenta"
+          }
+        },
+        "orders_subscribed": {
+          "direction": "server → client",
+          "description": "Confirmación de suscripción a order reports",
+          "format": {
+            "type": "orders_subscribed",
+            "account": "mi_cuenta",
+            "result": {
+              "status": "ok"
+            }
+          }
+        }
+      }
+    },
+    "market_data": {
+      "description": "Mensajes de datos de mercado",
+      "messages": {
+        "tick": {
+          "direction": "server → client",
+          "description": "Tick de cotización en tiempo real",
+          "format": {
+            "type": "tick",
+            "symbol": "GGAL",
+            "bid": 1500.0,
+            "bid_size": 1000,
+            "offer": 1501.0,
+            "offer_size": 500,
+            "last": 1500.5,
+            "last_size": 200,
+            "ts_ms": 1642248600000
+          }
+        }
+      }
+    },
+    "orders": {
+      "description": "Mensajes relacionados con órdenes",
+      "messages": {
+        "send_order": {
+          "direction": "client → server",
+          "description": "Enviar orden al broker",
+          "format": {
+            "type": "send_order",
+            "wsClOrdId": "MI_ORDEN_001",
+            "order": {
+              "symbol": "GGAL",
+              "side": "BUY",
+              "size": 100,
+              "price": 1500.0,
+              "order_type": "LIMIT",
+              "tif": "DAY",
+              "market": "ROFEX"
+            }
+          }
+        },
+        "order_ack": {
+          "direction": "server → client",
+          "description": "Confirmación de orden enviada",
+          "format": {
+            "type": "order_ack",
+            "request": {
+              "symbol": "GGAL",
+              "side": "BUY",
+              "size": 100,
+              "price": 1500.0,
+              "order_type": "LIMIT",
+              "tif": "DAY",
+              "market": "ROFEX",
+              "client_order_id": "MI_ORDEN_001"
+            },
+            "result": {
+              "status": "ok",
+              "response": {
+                "orderId": "12345",
+                "status": "NEW",
+                "timestamp": "2024-01-15T10:30:00Z"
+              }
+            }
+          }
+        },
+        "order_report": {
+          "direction": "server → client",
+          "description": "Reporte de orden del broker",
+          "variants": {
+            "new": {
+              "description": "Orden nueva",
+              "format": {
+                "type": "order_report",
+                "report": {
+                  "wsClOrdId": "MI_ORDEN_001",
+                  "orderId": "12345",
+                  "status": "NEW",
+                  "side": "BUY",
+                  "size": 100,
+                  "price": 1500.0,
+                  "instrument": {
+                    "symbol": "GGAL",
+                    "marketId": "ROFEX"
+                  },
+                  "timestamp": "2024-01-15T10:30:00Z",
+                  "account": "mi_cuenta",
+                  "timeInForce": "DAY",
+                  "orderType": "LIMIT"
+                }
+              }
+            },
+            "partially_filled": {
+              "description": "Orden parcialmente ejecutada",
+              "format": {
+                "type": "order_report",
+                "report": {
+                  "wsClOrdId": "MI_ORDEN_001",
+                  "orderId": "12345",
+                  "status": "PARTIALLY_FILLED",
+                  "side": "BUY",
+                  "size": 100,
+                  "price": 1500.0,
+                  "filledSize": 50,
+                  "remainingSize": 50,
+                  "lastFillPrice": 1500.0,
+                  "instrument": {
+                    "symbol": "GGAL",
+                    "marketId": "ROFEX"
+                  },
+                  "timestamp": "2024-01-15T10:31:00Z",
+                  "account": "mi_cuenta"
+                }
+              }
+            },
+            "filled": {
+              "description": "Orden completamente ejecutada",
+              "format": {
+                "type": "order_report",
+                "report": {
+                  "wsClOrdId": "MI_ORDEN_001",
+                  "orderId": "12345",
+                  "status": "FILLED",
+                  "side": "BUY",
+                  "size": 100,
+                  "price": 1500.0,
+                  "filledSize": 100,
+                  "remainingSize": 0,
+                  "lastFillPrice": 1500.0,
+                  "averagePrice": 1500.0,
+                  "instrument": {
+                    "symbol": "GGAL",
+                    "marketId": "ROFEX"
+                  },
+                  "timestamp": "2024-01-15T10:32:00Z",
+                  "account": "mi_cuenta"
+                }
+              }
+            },
+            "cancelled": {
+              "description": "Orden cancelada",
+              "format": {
+                "type": "order_report",
+                "report": {
+                  "wsClOrdId": "MI_ORDEN_001",
+                  "orderId": "12345",
+                  "status": "CANCELLED",
+                  "side": "BUY",
+                  "size": 100,
+                  "price": 1500.0,
+                  "filledSize": 0,
+                  "remainingSize": 100,
+                  "instrument": {
+                    "symbol": "GGAL",
+                    "marketId": "ROFEX"
+                  },
+                  "timestamp": "2024-01-15T10:33:00Z",
+                  "account": "mi_cuenta",
+                  "cancelReason": "USER_REQUEST"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "errors": {
+      "description": "Mensajes de error",
+      "messages": {
+        "error": {
+          "direction": "server → client",
+          "description": "Mensaje de error genérico",
+          "variants": {
+            "generic": {
+              "format": {
+                "type": "error",
+                "message": "Error interno del servidor",
+                "timestamp": 1642248600.0
+              }
+            },
+            "validation": {
+              "format": {
+                "type": "error",
+                "message": "Datos de orden inválidos",
+                "code": "VALIDATION_ERROR",
+                "details": {
+                  "field": "price",
+                  "reason": "Price must be greater than 0"
+                },
+                "timestamp": 1642248600.0
+              }
+            },
+            "connection": {
+              "format": {
+                "type": "error",
+                "message": "WebSocket no conectado",
+                "code": "WS_NOT_CONNECTED",
+                "timestamp": 1642248600.0
+              }
+            }
+          }
+        }
+      }
+    },
+    "status": {
+      "description": "Mensajes de estado del servicio",
+      "messages": {
+        "status": {
+          "direction": "server → client",
+          "description": "Estado completo del servicio",
+          "format": {
+            "type": "status",
+            "service": {
+              "started": true,
+              "started_at": 1642248000.0,
+              "user": "mi_usuario",
+              "account": "mi_cuenta",
+              "instruments": ["GGAL", "PAMP", "ALUA"],
+              "worker_running": true,
+              "ws_connected": true
+            },
+            "ws_details": {
+              "ws": "ok",
+              "user_id": "mi_usuario",
+              "subscribed": ["GGAL", "PAMP", "ALUA"],
+              "last_md_ms": 1642248600000,
+              "subscribers": 2,
+              "last_order_report": {
+                "wsClOrdId": "MI_ORDEN_001",
+                "status": "FILLED"
+              }
+            },
+            "timestamp": 1642248600.0
+          }
+        }
+      }
+    }
+  },
+  "field_definitions": {
+    "type": "Tipo de mensaje (connection, order_ack, order_report, etc.)",
+    "wsClOrdId": "Client Order ID - ID único del cliente para tracking (campo real del broker)",
+    "clOrdId": "Client Order ID - ID único del cliente para tracking (alternativo)",
+    "orderId": "Order ID - ID interno del broker",
+    "status": "Estado de la orden (NEW, PARTIALLY_FILLED, FILLED, CANCELLED)",
+    "symbol": "Símbolo del instrumento (GGAL, PAMP, ALUA, etc.)",
+    "side": "Lado de la orden (BUY, SELL)",
+    "size": "Cantidad total de la orden",
+    "price": "Precio de la orden",
+    "filledSize": "Cantidad ejecutada",
+    "remainingSize": "Cantidad pendiente",
+    "lastFillPrice": "Último precio de ejecución",
+    "averagePrice": "Precio promedio de ejecución",
+    "timestamp": "Timestamp del evento",
+    "ts_ms": "Timestamp en milisegundos",
+    "account": "Cuenta del usuario",
+    "instrument": "Información del instrumento",
+    "marketId": "ID del mercado (ROFEX, MERV, etc.)",
+    "orderType": "Tipo de orden (LIMIT, MARKET)",
+    "timeInForce": "Tiempo en vigor (DAY, IOC, FOK)",
+    "bid": "Precio de compra",
+    "offer": "Precio de venta",
+    "last": "Último precio",
+    "bid_size": "Cantidad en compra",
+    "offer_size": "Cantidad en venta",
+    "last_size": "Cantidad del último precio"
+  },
+  "order_statuses": {
+    "NEW": "Orden nueva, enviada al broker",
+    "PENDING_NEW": "Orden pendiente de confirmación",
+    "PARTIALLY_FILLED": "Orden parcialmente ejecutada",
+    "FILLED": "Orden completamente ejecutada",
+    "CANCELLED": "Orden cancelada",
+    "REJECTED": "Orden rechazada",
+    "EXPIRED": "Orden expirada",
+    "PENDING_CANCEL": "Cancelación pendiente",
+    "PENDING_REPLACE": "Modificación pendiente",
+    "REPLACED": "Orden modificada"
+  },
+  "order_types": {
+    "LIMIT": "Orden limitada - se ejecuta solo al precio especificado o mejor",
+    "MARKET": "Orden de mercado - se ejecuta al mejor precio disponible",
+    "STOP": "Orden stop - se activa cuando se alcanza un precio",
+    "STOP_LIMIT": "Orden stop limitada - combinación de stop y limit"
+  },
+  "time_in_force": {
+    "DAY": "Válida durante el día de trading",
+    "IOC": "Immediate or Cancel - ejecutar inmediatamente o cancelar",
+    "FOK": "Fill or Kill - ejecutar completamente o cancelar",
+    "GTC": "Good Till Cancelled - válida hasta cancelar"
+  }
+}

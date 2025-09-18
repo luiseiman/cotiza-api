@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ejemplo WebSocket con Client Order ID</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        .status { padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .success { background-color: #d4edda; border: 1px solid #c3e6cb; }
+        .error { background-color: #f8d7da; border: 1px solid #f5c6cb; }
+        .info { background-color: #d1ecf1; border: 1px solid #bee5eb; }
+        .order-form { background-color: #f8f9fa; padding: 20px; border-radius: 5px; margin: 20px 0; }
+        .form-group { margin: 10px 0; }
+        label { display: inline-block; width: 100px; }
+        input, select { padding: 5px; margin: 5px; }
+        button { padding: 10px 20px; margin: 5px; background-color: #007bff; color: white; border: none; border-radius: 3px; cursor: pointer; }
+        button:hover { background-color: #0056b3; }
+        button:disabled { background-color: #6c757d; cursor: not-allowed; }
+        .logs { background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0; max-height: 400px; overflow-y: auto; }
+        .log-entry { margin: 5px 0; padding: 5px; border-left: 3px solid #007bff; }
+        .log-error { border-left-color: #dc3545; }
+        .log-success { border-left-color: #28a745; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Ejemplo WebSocket con Client Order ID</h1>
+        
+        <div id="connection-status" class="status info">
+            🔌 Desconectado
+        </div>
+        
+        <div class="order-form">
+            <h3>📋 Enviar Orden</h3>
+            <div class="form-group">
+                <label>Símbolo:</label>
+                <input type="text" id="symbol" value="GGAL" placeholder="Ej: GGAL">
+            </div>
+            <div class="form-group">
+                <label>Lado:</label>
+                <select id="side">
+                    <option value="BUY">BUY</option>
+                    <option value="SELL">SELL</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Cantidad:</label>
+                <input type="number" id="size" value="100" placeholder="100">
+            </div>
+            <div class="form-group">
+                <label>Precio:</label>
+                <input type="number" id="price" value="1500" step="0.01" placeholder="1500.00">
+            </div>
+            <div class="form-group">
+                <label>Tipo:</label>
+                <select id="orderType">
+                    <option value="LIMIT">LIMIT</option>
+                    <option value="MARKET">MARKET</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>Client Order ID:</label>
+                <input type="text" id="clientOrderId" placeholder="Se genera automáticamente">
+            </div>
+            
+            <button onclick="connect()" id="connectBtn">🔗 Conectar</button>
+            <button onclick="disconnect()" id="disconnectBtn" disabled>🔌 Desconectar</button>
+            <button onclick="sendOrder()" id="sendBtn" disabled>📤 Enviar Orden</button>
+            <button onclick="clearLogs()" id="clearBtn">🗑️ Limpiar Logs</button>
+        </div>
+        
+        <div class="order-form">
+            <h3>📊 Estado de Órdenes</h3>
+            <div id="orders-status">
+                <p>No hay órdenes enviadas</p>
+            </div>
+        </div>
+        
+        <div class="logs">
+            <h3>📝 Logs</h3>
+            <div id="logs"></div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let connected = false;
+        let pendingOrders = new Map();
+        let orderReports = new Map();
+        
+        function log(message, type = 'info') {
+            const logsDiv = document.getElementById('logs');
+            const timestamp = new Date().toLocaleTimeString();
+            const logEntry = document.createElement('div');
+            logEntry.className = `log-entry log-${type}`;
+            logEntry.innerHTML = `<strong>[${timestamp}]</strong> ${message}`;
+            logsDiv.appendChild(logEntry);
+            logsDiv.scrollTop = logsDiv.scrollHeight;
+        }
+        
+        function updateConnectionStatus(status, type = 'info') {
+            const statusDiv = document.getElementById('connection-status');
+            statusDiv.className = `status ${type}`;
+            statusDiv.textContent = status;
+        }
+        
+        function updateButtons() {
+            document.getElementById('connectBtn').disabled = connected;
+            document.getElementById('disconnectBtn').disabled = !connected;
+            document.getElementById('sendBtn').disabled = !connected;
+        }
+        
+        function generateClientOrderId() {
+            return 'ORD_' + Math.random().toString(36).substr(2, 8).toUpperCase();
+        }
+        
+        function connect() {
+            const wsUrl = 'ws://localhost:8000/ws/cotizaciones';
+            
+            log('🔗 Conectando a WebSocket...', 'info');
+            
+            ws = new WebSocket(wsUrl);
+            
+            ws.onopen = function(event) {
+                connected = true;
+                updateConnectionStatus('✅ Conectado al WebSocket', 'success');
+                updateButtons();
+                log('✅ Conexión WebSocket establecida', 'success');
+                
+                // Suscribirse a order reports
+                subscribeToOrderReports();
+            };
+            
+            ws.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    handleMessage(data);
+                } catch (error) {
+                    log(`❌ Error procesando mensaje: ${error.message}`, 'error');
+                }
+            };
+            
+            ws.onerror = function(error) {
+                log(`❌ Error WebSocket: ${error}`, 'error');
+                updateConnectionStatus('❌ Error de conexión', 'error');
+            };
+            
+            ws.onclose = function(event) {
+                connected = false;
+                updateConnectionStatus('🔌 Desconectado', 'info');
+                updateButtons();
+                log('🔌 Conexión WebSocket cerrada', 'info');
+            };
+        }
+        
+        function disconnect() {
+            if (ws) {
+                ws.close();
+            }
+        }
+        
+        function subscribeToOrderReports() {
+            const message = {
+                type: 'orders_subscribe',
+                account: 'mi_cuenta'
+            };
+            
+            ws.send(JSON.stringify(message));
+            log('📋 Suscripción a order reports enviada', 'info');
+        }
+        
+        function handleMessage(data) {
+            const msgType = data.type;
+            
+            switch (msgType) {
+                case 'connection':
+                    log(`📡 ${data.message || 'Conectado'}`, 'info');
+                    break;
+                    
+                case 'orders_subscribed':
+                    log(`📋 Suscrito a order reports para cuenta: ${data.account}`, 'success');
+                    break;
+                    
+                case 'order_ack':
+                    handleOrderAck(data);
+                    break;
+                    
+                case 'order_report':
+                    handleOrderReport(data);
+                    break;
+                    
+                case 'error':
+                    log(`❌ Error: ${data.message}`, 'error');
+                    break;
+                    
+                default:
+                    log(`📨 Mensaje no reconocido: ${msgType}`, 'info');
+            }
+        }
+        
+        function handleOrderAck(data) {
+            const request = data.request || {};
+            const result = data.result || {};
+            const clientOrderId = request.client_order_id;
+            
+            log(`📤 Order ACK recibido para ${clientOrderId}`, 'success');
+            log(`   Status: ${result.status}`, 'info');
+            
+            // Actualizar estado de orden pendiente
+            if (pendingOrders.has(clientOrderId)) {
+                const order = pendingOrders.get(clientOrderId);
+                order.status = 'sent';
+                order.ackTime = new Date();
+                pendingOrders.set(clientOrderId, order);
+            }
+            
+            updateOrdersStatus();
+        }
+        
+        function handleOrderReport(data) {
+            const report = data.report || {};
+            
+            // Extraer client_order_id del reporte
+            const clientOrderId = report.clOrdId || report.clientId || report.client_order_id;
+            
+            if (clientOrderId) {
+                log(`📋 Order Report recibido para ${clientOrderId}`, 'success');
+                log(`   Status: ${report.status || 'N/A'}`, 'info');
+                log(`   Symbol: ${report.instrument?.symbol || 'N/A'}`, 'info');
+                log(`   Side: ${report.side || 'N/A'}`, 'info');
+                log(`   Size: ${report.size || 'N/A'}`, 'info');
+                log(`   Price: ${report.price || 'N/A'}`, 'info');
+                
+                // Guardar reporte
+                orderReports.set(clientOrderId, report);
+                
+                // Actualizar orden pendiente
+                if (pendingOrders.has(clientOrderId)) {
+                    const order = pendingOrders.get(clientOrderId);
+                    order.status = 'reported';
+                    order.report = report;
+                    order.reportTime = new Date();
+                    pendingOrders.set(clientOrderId, order);
+                }
+                
+                updateOrdersStatus();
+            }
+        }
+        
+        function sendOrder() {
+            if (!connected) {
+                log('❌ No conectado al WebSocket', 'error');
+                return;
+            }
+            
+            // Obtener datos del formulario
+            const symbol = document.getElementById('symbol').value;
+            const side = document.getElementById('side').value;
+            const size = parseFloat(document.getElementById('size').value);
+            const price = parseFloat(document.getElementById('price').value);
+            const orderType = document.getElementById('orderType').value;
+            
+            // Generar client_order_id si no se proporciona
+            let clientOrderId = document.getElementById('clientOrderId').value.trim();
+            if (!clientOrderId) {
+                clientOrderId = generateClientOrderId();
+                document.getElementById('clientOrderId').value = clientOrderId;
+            }
+            
+            // Validar datos
+            if (!symbol || !side || !size || !price) {
+                log('❌ Faltan datos requeridos', 'error');
+                return;
+            }
+            
+            // Crear orden
+            const orderData = {
+                symbol: symbol,
+                side: side,
+                size: size,
+                price: price,
+                order_type: orderType,
+                tif: 'DAY'
+            };
+            
+            // Crear mensaje
+            const message = {
+                type: 'send_order',
+                clOrdId: clientOrderId,  // Client Order ID
+                order: orderData
+            };
+            
+            // Guardar orden pendiente
+            pendingOrders.set(clientOrderId, {
+                order: orderData,
+                status: 'pending',
+                sendTime: new Date()
+            });
+            
+            // Enviar orden
+            ws.send(JSON.stringify(message));
+            
+            log(`📤 Orden enviada:`, 'info');
+            log(`   Client Order ID: ${clientOrderId}`, 'info');
+            log(`   Symbol: ${symbol}`, 'info');
+            log(`   Side: ${side}`, 'info');
+            log(`   Size: ${size}`, 'info');
+            log(`   Price: ${price}`, 'info');
+            
+            updateOrdersStatus();
+        }
+        
+        function updateOrdersStatus() {
+            const statusDiv = document.getElementById('orders-status');
+            
+            if (pendingOrders.size === 0) {
+                statusDiv.innerHTML = '<p>No hay órdenes enviadas</p>';
+                return;
+            }
+            
+            let html = '<table border="1" style="width: 100%; border-collapse: collapse;">';
+            html += '<tr><th>Client Order ID</th><th>Symbol</th><th>Side</th><th>Size</th><th>Price</th><th>Status</th><th>Time</th></tr>';
+            
+            for (const [clientOrderId, order] of pendingOrders) {
+                const report = orderReports.get(clientOrderId);
+                const status = report ? report.status : order.status;
+                const time = order.reportTime || order.ackTime || order.sendTime;
+                
+                html += `<tr>
+                    <td>${clientOrderId}</td>
+                    <td>${order.order.symbol}</td>
+                    <td>${order.order.side}</td>
+                    <td>${order.order.size}</td>
+                    <td>${order.order.price}</td>
+                    <td>${status}</td>
+                    <td>${time.toLocaleTimeString()}</td>
+                </tr>`;
+            }
+            
+            html += '</table>';
+            statusDiv.innerHTML = html;
+        }
+        
+        function clearLogs() {
+            document.getElementById('logs').innerHTML = '';
+        }
+        
+        // Generar client_order_id automáticamente al cargar
+        window.onload = function() {
+            document.getElementById('clientOrderId').value = generateClientOrderId();
+        };
+    </script>
+</body>
+</html>

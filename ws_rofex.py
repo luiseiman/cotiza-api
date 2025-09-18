@@ -283,6 +283,15 @@ class MarketDataManager:
         try:
             with self._lock:
                 self._last_order_report = message
+            
+            # Log del order report para debugging
+            client_order_id = (message.get("wsClOrdId") or 
+                             message.get("clOrdId") or 
+                             message.get("clientId") or 
+                             message.get("client_order_id"))
+            if client_order_id:
+                print(f"{PRINT_PREFIX} Order report recibido - Client Order ID: {client_order_id}, Status: {message.get('status', 'N/A')}")
+            
             # Difundir order report a interesados (vía callback genérico)
             try:
                 if _broadcast_callback:
@@ -345,8 +354,11 @@ class MarketDataManager:
                 if client_order_id is not None:
                     # Intentar diferentes nombres de campo que pyRofex pueda aceptar
                     try:
-                        # Primero intentar con clientId (más común)
-                        if hasattr(pr, 'clientId'):
+                        # Primero intentar con wsClOrdId (campo real del broker)
+                        if hasattr(pr, 'wsClOrdId'):
+                            kwargs["wsClOrdId"] = str(client_order_id)
+                        # Luego con clientId (más común)
+                        elif hasattr(pr, 'clientId'):
                             kwargs["clientId"] = str(client_order_id)
                         # Luego con clOrdId (estándar FIX)
                         elif hasattr(pr, 'clOrdId'):
