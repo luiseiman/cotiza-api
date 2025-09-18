@@ -354,8 +354,11 @@ class MarketDataManager:
                 if client_order_id is not None:
                     # Intentar diferentes nombres de campo que pyRofex pueda aceptar
                     try:
-                        # Primero intentar con wsClOrdId (campo real del broker)
-                        if hasattr(pr, 'wsClOrdId'):
+                        # Primero intentar con ws_client_order_id (campo correcto del broker)
+                        if hasattr(pr, 'ws_client_order_id'):
+                            kwargs["ws_client_order_id"] = str(client_order_id)
+                        # Luego con wsClOrdId (campo real del broker)
+                        elif hasattr(pr, 'wsClOrdId'):
                             kwargs["wsClOrdId"] = str(client_order_id)
                         # Luego con clientId (más común)
                         elif hasattr(pr, 'clientId'):
