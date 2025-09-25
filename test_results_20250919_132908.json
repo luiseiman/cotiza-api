@@ -1,0 +1,77 @@
+{
+  "timestamp": "20250919_132908",
+  "elapsed_time": 3.3396449089050293,
+  "summary": {
+    "total": 6,
+    "successful": 5,
+    "warnings": 0,
+    "failed": 1
+  },
+  "results": {
+    "environment": {
+      "status": "ok",
+      "missing": [],
+      "present": [
+        "ROFEX_USER=24239211",
+        "ROFEX_PASSWORD=GuEtAjEt...",
+        "ROFEX_ACCOUNT=16557",
+        "SUPABASE_URL=https://mxddwcabsxdtvcxyxghe.supabase.co",
+        "SUPABASE_KEY=eyJhbGci...",
+        "TELEGRAM_TOKEN=83289531...",
+        "TELEGRAM_CHAT_ID=10606550"
+      ]
+    },
+    "supabase": {
+      "status": "ok",
+      "pairs_count": 14,
+      "connection": "successful"
+    },
+    "telegram": {
+      "status": "ok",
+      "bot_username": "CotizaControlbot",
+      "bot_name": "CotservControl",
+      "connection": "successful",
+      "test_message": "sent"
+    },
+    "fastapi": {
+      "status": "ok",
+      "server_url": "http://127.0.0.1:8000",
+      "health_check": "successful",
+      "response": {
+        "status": "healthy",
+        "timestamp": 1758299347.1405492
+      },
+      "service_status": {
+        "started": false,
+        "started_at": null,
+        "user": null,
+        "account": null,
+        "instruments": [],
+        "worker_running": false,
+        "ws_connected": false,
+        "worker_status": "stopped",
+        "ws_details": {
+          "ws": "disabled",
+          "user_id": null,
+          "subscribed": [],
+          "last_md_ms": null,
+          "subscribers": 0,
+          "last_order_report": null
+        },
+        "uptime": null
+      }
+    },
+    "websocket": {
+      "status": "error",
+      "error": "BaseEventLoop.create_connection() got an unexpected keyword argument 'timeout'",
+      "connection": "failed"
+    },
+    "rofex": {
+      "status": "ok",
+      "user": "24239211",
+      "account": "16557",
+      "connection": "successful",
+      "environment": "LIVE"
+    }
+  }
+}

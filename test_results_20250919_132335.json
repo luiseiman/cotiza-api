@@ -1,0 +1,50 @@
+{
+  "timestamp": "20250919_132335",
+  "elapsed_time": 0.10550904273986816,
+  "summary": {
+    "total": 6,
+    "successful": 0,
+    "warnings": 0,
+    "failed": 6
+  },
+  "results": {
+    "environment": {
+      "status": "error",
+      "missing": [
+        "ROFEX_USER",
+        "ROFEX_PASSWORD",
+        "ROFEX_ACCOUNT",
+        "SUPABASE_URL",
+        "SUPABASE_KEY",
+        "TELEGRAM_TOKEN",
+        "TELEGRAM_CHAT_ID"
+      ],
+      "present": []
+    },
+    "supabase": {
+      "status": "error",
+      "error": "[supabase] FALTAN SUPABASE_URL / SUPABASE_KEY en .env. No se puede iniciar sin DB.",
+      "connection": "failed"
+    },
+    "telegram": {
+      "status": "error",
+      "error": "Token o Chat ID no configurados",
+      "connection": "failed"
+    },
+    "fastapi": {
+      "status": "error",
+      "error": "HTTPConnectionPool(host='127.0.0.1', port=8000): Max retries exceeded with url: /cotizaciones/health (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x102fcc440>: Failed to establish a new connection: [Errno 61] Connection refused'))",
+      "connection": "failed"
+    },
+    "websocket": {
+      "status": "error",
+      "error": "BaseEventLoop.create_connection() got an unexpected keyword argument 'timeout'",
+      "connection": "failed"
+    },
+    "rofex": {
+      "status": "error",
+      "error": "Credenciales ROFEX no configuradas",
+      "connection": "skipped"
+    }
+  }
+}

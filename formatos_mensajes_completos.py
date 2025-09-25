@@ -97,6 +97,8 @@ def mostrar_formatos_mensajes():
         "offer_size": 500,
         "last": 1500.5,
         "last_size": 200,
+        "cl": 1498.0,
+        "op": 1502.0,
         "ts_ms": 1642248600000
     }
     print(f"   {json.dumps(tick, indent=2, ensure_ascii=False)}")
@@ -344,7 +346,9 @@ def mostrar_campos_importantes():
         "last": "Último precio",
         "bid_size": "Cantidad en compra",
         "offer_size": "Cantidad en venta",
-        "last_size": "Cantidad del último precio"
+        "last_size": "Cantidad del último precio",
+        "cl": "Precio de cierre de la rueda anterior (closing price)",
+        "op": "Precio de apertura de la rueda actual (opening price)"
     }
     
     for campo, significado in campos.items():

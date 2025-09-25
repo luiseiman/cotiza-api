@@ -1,6 +1,7 @@
 from __future__ import annotations
 import time
 import threading
+import json
 from typing import Any, Dict, Iterable, Optional, Tuple
 
 try:
@@ -103,6 +104,44 @@ def _extract_levels(message: Dict[str, Any]):
     l_price, l_size = _first_price_and_size(last)
     return (b_price, b_size), (a_price, a_size), (l_price, l_size)
 
+def _extract_closing_price(message: Dict[str, Any]) -> Optional[float]:
+    """Intenta extraer el precio de cierre de la rueda anterior.
+    Soporta varias claves posibles según la fuente del mensaje.
+    """
+    md = message.get("marketData") or message.get("md") or message
+    for key in ("CL", "cl", "closingPrice", "previousClose", "prev_close"):
+        v = md.get(key)
+        try:
+            if v is None:
+                continue
+            # Puede venir como dict {"price": x}
+            if isinstance(v, dict):
+                vp = v.get("price") or v.get("p")
+                return float(vp) if vp is not None else None
+            # O valor directo
+            return float(v)
+        except Exception:
+            continue
+    return None
+
+def _extract_opening_price(message: Dict[str, Any]) -> Optional[float]:
+    """Intenta extraer el precio de apertura de la rueda actual.
+    Acepta claves comunes: OP/op/openPrice/open.
+    """
+    md = message.get("marketData") or message.get("md") or message
+    for key in ("OP", "op", "openPrice", "open"):
+        v = md.get(key)
+        try:
+            if v is None:
+                continue
+            if isinstance(v, dict):
+                vp = v.get("price") or v.get("p")
+                return float(vp) if vp is not None else None
+            return float(v)
+        except Exception:
+            continue
+    return None
+
 class MarketDataManager:
     def __init__(self) -> None:
         self._pyrofex = None
@@ -138,6 +177,14 @@ class MarketDataManager:
             try:
                 import pyRofex as pr
                 self._pyrofex = pr
+                
+                # Deshabilitar verificación SSL para macOS
+                import ssl
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                ssl._create_default_https_context = ssl._create_unverified_context
+                print(f"{PRINT_PREFIX} SSL verification disabled for macOS")
+                
             except Exception as e:
                 print(f"{PRINT_PREFIX} No se pudo importar pyRofex: {e}")
                 return {"status": "error", "error": "pyRofex not available", "ws": "disabled"}
@@ -145,23 +192,86 @@ class MarketDataManager:
             self.user = user
 
             try:
-                env = getattr(self._pyrofex.Environment, "LIVE")
-                self._pyrofex.initialize(user=user, password=password, account=account, environment=env)
+                # Usar LIVE para trading real, REMARKET para demo
+                try:
+                    env = getattr(self._pyrofex.Environment, "LIVE")
+                    self._pyrofex.initialize(user=user, password=password, account=account, environment=env)
+                    print(f"{PRINT_PREFIX} pyRofex inicializado con ambiente LIVE")
+                except Exception as live_error:
+                    print(f"{PRINT_PREFIX} Error con LIVE, intentando REMARKET: {live_error}")
+                    env = getattr(self._pyrofex.Environment, "REMARKET")
+                    self._pyrofex.initialize(user=user, password=password, account=account, environment=env)
+                    print(f"{PRINT_PREFIX} pyRofex inicializado con ambiente REMARKET")
+                
+                # Configurar contexto SSL para macOS
+                import ssl
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+                print(f"{PRINT_PREFIX} Contexto SSL configurado para macOS")
+                
             except Exception as e:
+                print(f"{PRINT_PREFIX} Error inicializando pyRofex: {e}")
                 return {"status": "error", "error": str(e), "ws": "disabled"}
 
             def md_handler(msg: Dict[str, Any]):
                 self._handle_md(msg)
 
+            def error_handler(msg):
+                print(f"{PRINT_PREFIX} Error Message Received: {msg}")
+
+            def exception_handler(e):
+                print(f"{PRINT_PREFIX} Exception Occurred: {e}")
+
             try:
+                # Configurar contexto SSL para WebSocket
+                import ssl
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+                
+                # Inicializar WebSocket siguiendo el ejemplo oficial con contexto SSL
                 self._pyrofex.init_websocket_connection(
                     market_data_handler=md_handler,
                     order_report_handler=self._handle_or,
-                    error_handler=lambda e: print(f"{PRINT_PREFIX} WS error: {e}")
+                    error_handler=error_handler,
+                    exception_handler=exception_handler,
+                    ssl_context=ssl_context
                 )
                 self._ws_open = True
+                print(f"{PRINT_PREFIX} WebSocket connection initialized with SSL context")
+                
+                # Suscribirse a order reports primero (como en el ejemplo oficial)
+                try:
+                    self._pyrofex.order_report_subscription()
+                    print(f"{PRINT_PREFIX} Suscripción a order reports exitosa")
+                except Exception as e:
+                    print(f"{PRINT_PREFIX} Error en suscripción order reports: {e}")
+                    
             except Exception as e:
-                return {"status": "error", "error": str(e), "ws": "disabled"}
+                print(f"{PRINT_PREFIX} Error inicializando WebSocket: {e}")
+                # Si falla con ssl_context, intentar sin él
+                try:
+                    print(f"{PRINT_PREFIX} Intentando sin contexto SSL...")
+                    self._pyrofex.init_websocket_connection(
+                        market_data_handler=md_handler,
+                        order_report_handler=self._handle_or,
+                        error_handler=error_handler,
+                        exception_handler=exception_handler
+                    )
+                    self._ws_open = True
+                    print(f"{PRINT_PREFIX} WebSocket connection initialized without SSL context")
+                    
+                    # Suscribirse a order reports
+                    try:
+                        self._pyrofex.order_report_subscription()
+                        print(f"{PRINT_PREFIX} Suscripción a order reports exitosa")
+                    except Exception as e2:
+                        print(f"{PRINT_PREFIX} Error en suscripción order reports: {e2}")
+                        
+                except Exception as e2:
+                    print(f"{PRINT_PREFIX} Error inicializando WebSocket sin SSL: {e2}")
+                    return {"status": "error", "error": str(e2), "ws": "disabled"}
 
             self._subscribe_many(instrumentos)
 
@@ -208,7 +318,9 @@ class MarketDataManager:
         entries = [
             self._pyrofex.MarketDataEntry.BIDS,
             self._pyrofex.MarketDataEntry.OFFERS,
-            self._pyrofex.MarketDataEntry.LAST
+            self._pyrofex.MarketDataEntry.LAST,
+            self._pyrofex.MarketDataEntry.CLOSING_PRICE,
+            self._pyrofex.MarketDataEntry.OPENING_PRICE
         ]
         for sym in instrumentos:
             if sym not in self._subscribed:
@@ -227,11 +339,15 @@ class MarketDataManager:
             return
         (bid_p, bid_sz), (ask_p, ask_sz), (last_p, last_sz) = _extract_levels(message)
         ts_ms = _extract_ts(message)
+        cl_price = _extract_closing_price(message)
+        op_price = _extract_opening_price(message)
         self.last_marketdata_at_ms = ts_ms
         quotes_cache[symbol] = {
             "bid": bid_p, "bid_size": bid_sz,
             "offer": ask_p, "offer_size": ask_sz,
             "last": last_p, "last_size": last_sz,
+            "cl": cl_price,
+            "op": op_price,
             "timestamp": ts_ms,
         }
 
@@ -245,6 +361,8 @@ class MarketDataManager:
             "offer_size": ask_sz,
             "last": last_p,
             "last_size": last_sz,
+            "cl": cl_price,
+            "op": op_price,
             "ts_ms": ts_ms,
         }
 
@@ -263,6 +381,8 @@ class MarketDataManager:
                         "bid": bid_p, 
                         "offer": ask_p, 
                         "last": last_p, 
+                        "cl": cl_price,
+                        "op": op_price,
                         "ts_ms": ts_ms,
                         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z")
                     }
@@ -309,13 +429,12 @@ class MarketDataManager:
             if not self._pyrofex or not self._ws_open:
                 return {"status": "error", "message": "ws_not_connected"}
             try:
-                # Mejor esfuerzo: primero 'account', luego 'accounts=[...]'
-                try:
-                    self._pyrofex.order_report_subscription(account=account)
-                except Exception:
-                    self._pyrofex.order_report_subscription(accounts=[account])
+                # Seguir el ejemplo oficial - sin parámetros
+                self._pyrofex.order_report_subscription()
+                print(f"{PRINT_PREFIX} Suscripción a order reports exitosa")
                 return {"status": "ok"}
             except Exception as e:
+                print(f"{PRINT_PREFIX} Error en suscripción order reports: {e}")
                 return {"status": "error", "message": str(e)}
 
     def send_order(self, *, symbol: str, side: str, size: float, price: Optional[float] = None,
@@ -341,55 +460,65 @@ class MarketDataManager:
                 except Exception:
                     tif_arg = None
 
+                # Construir parámetros siguiendo el ejemplo oficial
                 kwargs = {
                     "ticker": symbol,
                     "side": _side,
-                    "size": float(size),
+                    "size": int(size),  # Usar int como en el ejemplo
                     "order_type": _otype,
                 }
-                if price is not None:
+                
+                # Agregar precio si es LIMIT
+                if price is not None and _otype == pr.OrderType.LIMIT:
                     kwargs["price"] = float(price)
-                if tif_arg is not None:
-                    kwargs["time_in_force"] = tif_arg
-                if client_order_id is not None:
-                    # Usar directamente ws_client_order_id (campo correcto del broker)
-                    try:
-                        kwargs["ws_client_order_id"] = str(client_order_id)
-                        print(f"{PRINT_PREFIX} Enviando orden con ws_client_order_id: {client_order_id}")
-                    except Exception as e:
-                        print(f"{PRINT_PREFIX} Error con ws_client_order_id: {e}")
-                        # Fallback a otros campos
-                        try:
-                            kwargs["wsClOrdId"] = str(client_order_id)
-                            print(f"{PRINT_PREFIX} Fallback a wsClOrdId: {client_order_id}")
-                        except Exception as e2:
-                            print(f"{PRINT_PREFIX} Error con wsClOrdId: {e2}")
-                            kwargs["client_order_id"] = str(client_order_id)
-                            print(f"{PRINT_PREFIX} Fallback a client_order_id: {client_order_id}")
-                if market:
-                    # Intentar mapear a enum de Market si existe
-                    try:
-                        m = None
-                        if hasattr(pr, "Market"):
-                            # Coincidencia directa
-                            m = getattr(pr.Market, str(market).upper(), None)
-                            # Alias comunes
-                            if m is None and str(market).upper() == "ROFX" and hasattr(pr.Market, "ROFEX"):
-                                m = getattr(pr.Market, "ROFEX")
-                            if m is None and str(market).upper() == "MERV" and hasattr(pr.Market, "MERV"):
-                                m = getattr(pr.Market, "MERV")
-                        if m is not None:
-                            kwargs["market"] = m
-                        else:
-                            # Si no hay enum, enviar string solo si la lib lo acepta
-                            kwargs["market"] = str(market)
-                    except Exception:
-                        kwargs["market"] = str(market)
+                
+                # Agregar client_order_id si se proporciona (usar ws_client_order_id como indica el error)
+                if client_order_id:
+                    kwargs["ws_client_order_id"] = str(client_order_id)
+                
+                print(f"{PRINT_PREFIX} Enviando orden: {symbol} {side} {size} @ {price}")
 
                 res = pr.send_order_via_websocket(**kwargs)
+                print(f"{PRINT_PREFIX} Orden enviada exitosamente: {symbol} {side} {size} @ {price}")
                 return {"status": "ok", "response": res}
             except Exception as e:
-                return {"status": "error", "message": str(e)}
+                error_msg = str(e)
+                print(f"{PRINT_PREFIX} Error enviando orden: {error_msg}")
+                
+                # Manejar errores específicos de conexión
+                if "Connection is already closed" in error_msg:
+                    print(f"{PRINT_PREFIX} Conexión ROFEX cerrada, intentando reconectar...")
+                    self._ws_open = False
+                    return {"status": "error", "message": "connection_closed", "details": error_msg}
+                elif "Authentication fails" in error_msg:
+                    print(f"{PRINT_PREFIX} Error de autenticación ROFEX")
+                    return {"status": "error", "message": "authentication_failed", "details": error_msg}
+                else:
+                    return {"status": "error", "message": error_msg}
+
+    def check_and_reconnect(self) -> Dict[str, Any]:
+        """Verifica la conexión y reconecta si es necesario"""
+        with self._lock:
+            if not self._pyrofex:
+                return {"status": "error", "message": "pyRofex not initialized"}
+            
+            if not self._ws_open:
+                print(f"{PRINT_PREFIX} Conexión cerrada, intentando reconectar...")
+                try:
+                    # Intentar reconectar con los últimos parámetros
+                    if self._last_params:
+                        result = self.start(**self._last_params)
+                        if result.get("status") == "started":
+                            print(f"{PRINT_PREFIX} Reconexión exitosa")
+                            return {"status": "ok", "message": "reconnected"}
+                        else:
+                            return {"status": "error", "message": "reconnection_failed", "details": result}
+                    else:
+                        return {"status": "error", "message": "no_last_params_for_reconnect"}
+                except Exception as e:
+                    return {"status": "error", "message": f"reconnect_error: {str(e)}"}
+            else:
+                return {"status": "ok", "message": "connection_alive"}
 
     def last_order_report(self) -> Optional[Dict[str, Any]]:
         with self._lock:

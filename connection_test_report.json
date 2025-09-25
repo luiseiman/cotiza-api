@@ -1,0 +1,63 @@
+{
+  "project": "Cotiza API",
+  "analysis_date": "2025-09-19T13:25:09.514944",
+  "services": {
+    "fastapi": {
+      "file": "main.py",
+      "port": 8000,
+      "description": "Servidor principal con endpoints REST y WebSocket",
+      "endpoints": [
+        "/cotizaciones/health",
+        "/cotizaciones/status",
+        "/cotizaciones/iniciar",
+        "/cotizaciones/detener",
+        "/ws/cotizaciones"
+      ]
+    },
+    "rofex_websocket": {
+      "file": "ws_rofex.py",
+      "description": "Cliente WebSocket para ROFEX",
+      "features": [
+        "market_data",
+        "order_reports",
+        "order_management"
+      ]
+    },
+    "supabase": {
+      "file": "supabase_client.py",
+      "description": "Cliente de base de datos Supabase",
+      "features": [
+        "active_pairs",
+        "ratios_history",
+        "trading_rules"
+      ]
+    },
+    "telegram": {
+      "file": "telegram_control.py",
+      "description": "Bot de Telegram para control remoto",
+      "features": [
+        "remote_control",
+        "notifications",
+        "status_monitoring"
+      ]
+    }
+  },
+  "test_scripts": [
+    "test_conexiones.py",
+    "test_conexiones_demo.py",
+    "test_websocket.py",
+    "test_basic.py",
+    "test_connectivity.py",
+    "test_server.py"
+  ],
+  "required_env_vars": [
+    "ROFEX_USER",
+    "ROFEX_PASSWORD",
+    "ROFEX_ACCOUNT",
+    "SUPABASE_URL",
+    "SUPABASE_KEY",
+    "TELEGRAM_TOKEN",
+    "TELEGRAM_CHAT_ID"
+  ],
+  "status": "ready_for_configuration"
+}

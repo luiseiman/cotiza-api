@@ -1,0 +1,67 @@
+{
+  "timestamp": "20250919_132400",
+  "elapsed_time": 2.0201218128204346,
+  "demo_mode": true,
+  "summary": {
+    "total": 6,
+    "successful": 6,
+    "warnings": 0,
+    "failed": 0
+  },
+  "results": {
+    "environment": {
+      "status": "ok",
+      "missing": [],
+      "present": [
+        "ROFEX_USER=demo_user",
+        "ROFEX_PASSWORD=demo_pass***",
+        "ROFEX_ACCOUNT=demo_account",
+        "SUPABASE_URL=https://demo.supabase.co",
+        "SUPABASE_KEY=demo_key***",
+        "TELEGRAM_TOKEN=demo_token***",
+        "TELEGRAM_CHAT_ID=123456789"
+      ]
+    },
+    "supabase": {
+      "status": "ok",
+      "pairs_count": 3,
+      "connection": "successful"
+    },
+    "telegram": {
+      "status": "ok",
+      "bot_username": "cotiza_demo_bot",
+      "bot_name": "Cotiza Demo Bot",
+      "connection": "successful",
+      "test_message": "sent"
+    },
+    "fastapi": {
+      "status": "ok",
+      "server_url": "http://127.0.0.1:8000",
+      "health_check": "successful",
+      "response": {
+        "status": "healthy",
+        "timestamp": 1758299039.724443
+      },
+      "service_status": {
+        "started": false,
+        "user": null,
+        "account": null,
+        "worker_status": "stopped",
+        "ws_connected": false
+      }
+    },
+    "websocket": {
+      "status": "ok",
+      "ws_url": "ws://127.0.0.1:8000/ws/cotizaciones",
+      "connection": "successful",
+      "ping_pong": "working"
+    },
+    "rofex": {
+      "status": "ok",
+      "user": "demo_user",
+      "account": "demo_account",
+      "connection": "successful",
+      "environment": "LIVE"
+    }
+  }
+}

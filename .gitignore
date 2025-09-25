@@ -1,0 +1,23 @@
+# Environment files
+.env
+.env.*
+
+# Virtual environments
+.venv/
+venv/
+
+# Python cache/artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# OS/editor files
+.DS_Store
+.idea/
+
+# Logs
+*.log
+websocket_test_log_*.json
+order_execution_log_*.json
+

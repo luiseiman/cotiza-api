@@ -1,0 +1,54 @@
+{
+  "timestamp": "20250919_132854",
+  "elapsed_time": 3.8663389682769775,
+  "summary": {
+    "total": 6,
+    "successful": 4,
+    "warnings": 0,
+    "failed": 2
+  },
+  "results": {
+    "environment": {
+      "status": "ok",
+      "missing": [],
+      "present": [
+        "ROFEX_USER=24239211",
+        "ROFEX_PASSWORD=GuEtAjEt...",
+        "ROFEX_ACCOUNT=16557",
+        "SUPABASE_URL=https://mxddwcabsxdtvcxyxghe.supabase.co",
+        "SUPABASE_KEY=eyJhbGci...",
+        "TELEGRAM_TOKEN=83289531...",
+        "TELEGRAM_CHAT_ID=10606550"
+      ]
+    },
+    "supabase": {
+      "status": "ok",
+      "pairs_count": 14,
+      "connection": "successful"
+    },
+    "telegram": {
+      "status": "ok",
+      "bot_username": "CotizaControlbot",
+      "bot_name": "CotservControl",
+      "connection": "successful",
+      "test_message": "sent"
+    },
+    "fastapi": {
+      "status": "error",
+      "error": "HTTPConnectionPool(host='127.0.0.1', port=8000): Max retries exceeded with url: /cotizaciones/health (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x11406acf0>: Failed to establish a new connection: [Errno 61] Connection refused'))",
+      "connection": "failed"
+    },
+    "websocket": {
+      "status": "error",
+      "error": "BaseEventLoop.create_connection() got an unexpected keyword argument 'timeout'",
+      "connection": "failed"
+    },
+    "rofex": {
+      "status": "ok",
+      "user": "24239211",
+      "account": "16557",
+      "connection": "successful",
+      "environment": "LIVE"
+    }
+  }
+}

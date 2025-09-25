@@ -387,6 +387,25 @@ async def websocket_endpoint(websocket: WebSocket):
                                 market=payload.get("market"),
                                 client_order_id=client_order_id,
                             )
+                            
+                            # Si hay error de conexión, intentar reconectar
+                            if res.get("status") == "error" and res.get("message") == "connection_closed":
+                                print(f"[websocket] Intentando reconectar ROFEX...")
+                                reconnect_res = ws_rofex.manager.check_and_reconnect()
+                                if reconnect_res.get("status") == "ok":
+                                    # Reintentar la orden después de reconectar
+                                    res = ws_rofex.manager.send_order(
+                                        symbol=payload.get("symbol"),
+                                        side=payload.get("side"),
+                                        size=payload.get("size"),
+                                        price=payload.get("price"),
+                                        order_type=payload.get("order_type", "LIMIT"),
+                                        tif=payload.get("tif", "DAY"),
+                                        market=payload.get("market"),
+                                        client_order_id=client_order_id,
+                                    )
+                                    res["reconnected"] = True
+                            
                             await websocket.send_text(json.dumps({
                                 "type": "order_ack",
                                 "request": payload,
@@ -638,6 +657,15 @@ def last_params():
 		return get_last_params() or {}
 	except Exception as e:
 		return {"error": str(e)}
+
+@app.post("/cotizaciones/reconnect_rofex")
+def reconnect_rofex():
+	"""Reconecta la conexión ROFEX si es necesario"""
+	try:
+		result = ws_rofex.manager.check_and_reconnect()
+		return result
+	except Exception as e:
+		return {"status": "error", "message": f"Error reconectando: {str(e)}"}
 
 @app.post("/cotizaciones/iniciar_auto")
 def iniciar_auto():
