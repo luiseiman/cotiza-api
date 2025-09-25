@@ -13,7 +13,7 @@ def print_final_corrections_summary():
     print()
     
     print("📋 EJEMPLO OFICIAL DE pyRofex ANALIZADO:")
-    print("• Inicialización: pyRofex.initialize() con ambiente REMARKET")
+    print("• Inicialización: pyRofex.initialize() con ambiente LIVE")
     print("• Handlers: order_report_handler, error_handler, exception_handler")
     print("• WebSocket: pyRofex.init_websocket_connection()")
     print("• Suscripción: pyRofex.order_report_subscription() sin parámetros")
@@ -24,10 +24,9 @@ def print_final_corrections_summary():
     print()
     
     print("1. 🔧 INICIALIZACIÓN DE pyRofex:")
-    print("   ❌ Antes: Solo ambiente LIVE")
-    print("   ✅ Después: Intento LIVE primero, fallback a REMARKET")
+    print("   ✅ Configurado: Solo ambiente LIVE por defecto")
     print("   📁 Archivo: ws_rofex.py - función start()")
-    print("   🧪 Resultado: Manejo robusto de ambientes")
+    print("   🧪 Resultado: Conexión directa a ambiente de producción")
     print()
     
     print("2. 🔧 HANDLERS DE WEBSOCKET:")

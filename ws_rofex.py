@@ -192,26 +192,13 @@ class MarketDataManager:
             self.user = user
 
             try:
-                # Usar LIVE para trading real, REMARKET para demo
-                try:
-                    env = getattr(self._pyrofex.Environment, "LIVE")
-                    self._pyrofex.initialize(user=user, password=password, account=account, environment=env)
-                    print(f"{PRINT_PREFIX} pyRofex inicializado con ambiente LIVE")
-                except Exception as live_error:
-                    print(f"{PRINT_PREFIX} Error con LIVE, intentando REMARKET: {live_error}")
-                    env = getattr(self._pyrofex.Environment, "REMARKET")
-                    self._pyrofex.initialize(user=user, password=password, account=account, environment=env)
-                    print(f"{PRINT_PREFIX} pyRofex inicializado con ambiente REMARKET")
-                
-                # Configurar contexto SSL para macOS
-                import ssl
-                ssl_context = ssl.create_default_context()
-                ssl_context.check_hostname = False
-                ssl_context.verify_mode = ssl.CERT_NONE
-                print(f"{PRINT_PREFIX} Contexto SSL configurado para macOS")
+                # Usar LIVE por defecto para trading real
+                env = getattr(self._pyrofex.Environment, "LIVE")
+                self._pyrofex.initialize(user=user, password=password, account=account, environment=env)
+                print(f"{PRINT_PREFIX} pyRofex inicializado con ambiente LIVE")
                 
             except Exception as e:
-                print(f"{PRINT_PREFIX} Error inicializando pyRofex: {e}")
+                print(f"{PRINT_PREFIX} Error inicializando pyRofex con LIVE: {e}")
                 return {"status": "error", "error": str(e), "ws": "disabled"}
 
             def md_handler(msg: Dict[str, Any]):

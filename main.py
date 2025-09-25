@@ -70,9 +70,9 @@ def _get_status():
         return _service_status.copy()
 
 def _get_env_creds():
-	user = os.getenv("ROFEX_USER")
+	user = os.getenv("ROFEX_USERNAME")
 	password = os.getenv("ROFEX_PASSWORD")
-	account = os.getenv("ROFEX_ACCOUNT")
+	account = os.getenv("ROFEX_ACCOUNT_NUMBER")
 	return user, password, account
 
 def _instruments_from_pairs(pairs) -> list[str]:
@@ -672,7 +672,7 @@ def iniciar_auto():
 	try:
 		user, password, account = _get_env_creds()
 		if not all([user, password, account]):
-			return {"status": "error", "message": "Faltan ROFEX_USER/ROFEX_PASSWORD/ROFEX_ACCOUNT en .env"}
+			return {"status": "error", "message": "Faltan ROFEX_USERNAME/ROFEX_PASSWORD/ROFEX_ACCOUNT_NUMBER en .env"}
 
 		pairs = get_active_pairs()
 		instrumentos = _instruments_from_pairs(pairs)
