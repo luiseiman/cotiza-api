@@ -216,3 +216,5 @@ PARA TU CASO (dashboard en tiempo real):
 Estos 3 índices son suficientes para >90% de casos.
 */
 
+
+

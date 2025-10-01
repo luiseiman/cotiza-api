@@ -336,3 +336,5 @@ MINUTO_FIN = 30      # 5:30 PM
 
 El sistema ahora ejecutará el refresh **SOLO** en los días y horarios que especificaste, ahorrando recursos y optimizando el rendimiento.
 
+
+

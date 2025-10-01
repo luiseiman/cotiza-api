@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Body, WebSocket, WebSocketDisconnect, HTTPException, status, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import ws_rofex
 from ratios_worker import start as start_worker, stop as stop_worker, set_session as set_worker_session
@@ -31,6 +31,64 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ---------------------------- Dashboard ratios API ----------------------------
+try:
+    from dashboard_ratios_api import router as dashboard_router, start_refresh_worker
+    app.include_router(dashboard_router, prefix="/api", tags=["dashboard"])
+except Exception as e:
+    print(f"[main] No se pudo incluir dashboard_ratios_api: {e}")
+
+# ---------------------------- Dashboard HTML ----------------------------
+@app.get("/", response_class=RedirectResponse)
+def root_redirect():
+    return RedirectResponse(url="/dashboard")
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard_page():
+    """Sirve el dashboard estático si existe, si no un mensaje básico."""
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        dash_path = os.path.join(base_dir, "dashboard.html")
+        if os.path.exists(dash_path):
+            return FileResponse(dash_path, media_type="text/html")
+    except Exception:
+        pass
+    # Fallback mínimo
+    return HTMLResponse("""
+    <!doctype html>
+    <html lang="es"><head><meta charset="utf-8"><title>Dashboard</title></head>
+    <body style="font-family: system-ui; padding: 16px;">
+      <h1>Dashboard</h1>
+      <p>No se encontró <code>dashboard.html</code>. Endpoints útiles:</p>
+      <ul>
+        <li><a href="/cotizaciones/health">/cotizaciones/health</a></li>
+        <li><a href="/cotizaciones/status">/cotizaciones/status</a></li>
+      </ul>
+    </body></html>
+    """)
+
+# ---------------------------- Dashboard control endpoints ----------------------------
+@app.post("/dashboard/start")
+def dashboard_start():
+    try:
+        return _dashboard_start()
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.post("/dashboard/stop")
+def dashboard_stop():
+    try:
+        return _dashboard_stop()
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.get("/dashboard/status")
+def dashboard_status():
+    try:
+        return _dashboard_status()
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 # Estado global del servicio
 _service_status = {
     "started": False,
@@ -42,6 +100,45 @@ _service_status = {
     "ws_connected": False
 }
 _status_lock = threading.Lock()
+
+# ---------------------------- Dashboard control (light worker) ----------------------------
+_dashboard_worker_thread: threading.Thread | None = None
+_dashboard_worker_stop = threading.Event()
+_dashboard_last_beat: float | None = None
+
+def _dashboard_worker_loop(interval_seconds: float = 2.0):
+    global _dashboard_last_beat
+    while not _dashboard_worker_stop.is_set():
+        _dashboard_last_beat = time.time()
+        _dashboard_worker_stop.wait(interval_seconds)
+
+def _dashboard_start():
+    global _dashboard_worker_thread
+    if _dashboard_worker_thread and _dashboard_worker_thread.is_alive():
+        return {"status": "ok", "message": "Dashboard ya estaba activo"}
+    _dashboard_worker_stop.clear()
+    _dashboard_worker_thread = threading.Thread(target=_dashboard_worker_loop, daemon=True)
+    _dashboard_worker_thread.start()
+    return {"status": "ok", "message": "Dashboard iniciado"}
+
+def _dashboard_stop():
+    global _dashboard_worker_thread
+    _dashboard_worker_stop.set()
+    if _dashboard_worker_thread and _dashboard_worker_thread.is_alive():
+        try:
+            _dashboard_worker_thread.join(timeout=2)
+        except Exception:
+            pass
+    _dashboard_worker_thread = None
+    return {"status": "ok", "message": "Dashboard detenido"}
+
+def _dashboard_status():
+    running = _dashboard_worker_thread is not None and _dashboard_worker_thread.is_alive()
+    return {
+        "running": running,
+        "last_beat": _dashboard_last_beat,
+        "uptime_seconds": (time.time() - (_dashboard_last_beat or time.time())) if running and _dashboard_last_beat else None,
+    }
 
 # ---------------------------- Order tracing (in-memory) ----------------------------
 _order_logs: list[dict] = []
@@ -131,14 +228,28 @@ def _startup():
             print(f"[main] error ensure_started: {e}")
     else:
         print("[main] Telegram polling deshabilitado por TELEGRAM_POLLING!=1")
-    # No iniciar worker automáticamente, solo cuando se solicite
+    # Iniciar worker de refresh de dashboard (si está disponible)
+    try:
+        start_refresh_worker()
+    except Exception as e:
+        print(f"[main] No se pudo iniciar dashboard_refresh worker: {e}")
+    # No iniciar worker de ratios automáticamente, solo cuando se solicite
     print("[main] Servicio listo. Use /start para iniciar.")
+    # Iniciar "dashboard" por defecto para latidos
+    try:
+        _dashboard_start()
+    except Exception:
+        pass
 
 @app.on_event("shutdown")
 def _shutdown():
     print("[main] shutdown")
     stop_worker()
     ws_rofex.manager.stop()
+    try:
+        _dashboard_stop()
+    except Exception:
+        pass
 
 @app.post("/cotizaciones/iniciar")
 def iniciar(req: IniciarRequest):

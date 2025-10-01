@@ -374,3 +374,5 @@ SELECT jobid, active FROM cron.job WHERE jobname = 'refresh-ratios-dashboard';
 - [Supabase Database Extensions](https://supabase.com/docs/guides/database/extensions)
 - [Cron syntax](https://crontab.guru/)
 
+
+

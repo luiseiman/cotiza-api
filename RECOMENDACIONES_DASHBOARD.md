@@ -277,3 +277,4 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 **Ganancia de rendimiento:** 50-200x más rápido  
 **ROI:** ⭐⭐⭐⭐⭐
 
+

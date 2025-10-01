@@ -17,3 +17,4 @@ WHERE table_name = 'terminal_ratios_history'
     AND column_name LIKE 'last%'
 ORDER BY column_name;
 
+

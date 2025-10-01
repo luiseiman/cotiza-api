@@ -123,3 +123,4 @@ Este script simula datos de mercado y muestra cómo se calculan y guardan los nu
 **Autor**: Luis Eiman  
 **Versión**: 1.0
 
+
