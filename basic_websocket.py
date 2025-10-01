@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
 """
-Servidor de prueba simple para WebSocket.
+WebSocket básico para dashboard - versión mínima que funciona.
 """
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import json
 import time
+from fastapi import WebSocket, WebSocketDisconnect
+from supabase_client import supabase
 
-app = FastAPI()
 
-@app.get("/")
-def root():
-    return {"message": "Servidor WebSocket funcionando", "websocket": "/ws/dashboard"}
-
-@app.websocket("/ws/dashboard")
 async def websocket_endpoint(websocket: WebSocket):
+    """Endpoint WebSocket básico."""
     await websocket.accept()
     
     try:
@@ -23,7 +19,7 @@ async def websocket_endpoint(websocket: WebSocket):
             "type": "connection",
             "status": "connected",
             "timestamp": time.time(),
-            "message": "WebSocket conectado correctamente"
+            "message": "WebSocket conectado"
         }
         await websocket.send_text(json.dumps(welcome))
         
@@ -39,25 +35,34 @@ async def websocket_endpoint(websocket: WebSocket):
                     await websocket.send_text(json.dumps(pong))
                     
                 elif message.get("action") == "get_data":
-                    # Datos de prueba
-                    test_data = {
-                        "status": "success",
-                        "data": [
-                            {
-                                "par": "TEST-USD",
-                                "client_id_result": "test_client",
-                                "ultimo_ratio_operado": 1.2345,
-                                "promedio_rueda": 1.2300,
-                                "dif_rueda_pct": 0.37,
-                                "promedio_dia_anterior": 1.2200,
-                                "dif_dia_anterior_pct": 1.19
+                    # Obtener datos del dashboard
+                    try:
+                        response = supabase.table("ratios_dashboard_view").select("*").execute()
+                        
+                        if response.data:
+                            result = {
+                                "status": "success",
+                                "data": response.data,
+                                "count": len(response.data),
+                                "timestamp": time.time()
                             }
-                        ],
-                        "count": 1,
-                        "timestamp": time.time()
-                    }
-                    await websocket.send_text(json.dumps(test_data))
-                    
+                        else:
+                            result = {
+                                "status": "error",
+                                "error": "No data available",
+                                "timestamp": time.time()
+                            }
+                            
+                        await websocket.send_text(json.dumps(result))
+                        
+                    except Exception as e:
+                        error = {
+                            "status": "error",
+                            "error": str(e),
+                            "timestamp": time.time()
+                        }
+                        await websocket.send_text(json.dumps(error))
+                        
                 else:
                     error = {
                         "type": "error",
@@ -75,12 +80,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 await websocket.send_text(json.dumps(error))
                 
     except WebSocketDisconnect:
-        print("Cliente desconectado")
+        pass
     except Exception as e:
-        print(f"Error: {e}")
-
-if __name__ == "__main__":
-    import uvicorn
-    print("🚀 Iniciando servidor de prueba en http://localhost:8000")
-    print("📡 WebSocket disponible en ws://localhost:8000/ws/dashboard")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        print(f"[WS] Error: {e}")

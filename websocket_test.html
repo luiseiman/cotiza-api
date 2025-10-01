@@ -141,6 +141,7 @@
             <button id="disconnectBtn" onclick="disconnect()" disabled>🔌 Desconectar</button>
             <button onclick="sendPing()">📡 Ping</button>
             <button onclick="getStatus()">📊 Estado</button>
+            <button onclick="getData()">📈 Datos</button>
             <button onclick="clearLog()">🗑️ Limpiar Log</button>
         </div>
         
@@ -268,6 +269,12 @@
                 try {
                     const data = JSON.parse(event.data);
                     
+                    // Manejar mensaje de conexión
+                    if (data.type === 'connection' && data.status === 'connected') {
+                        log('Conexión establecida correctamente', 'success');
+                        return;
+                    }
+                    
                     // Manejar respuestas a comandos
                     if (data.action === 'pong') {
                         log('Pong recibido', 'success');
@@ -276,7 +283,13 @@
                     
                     // Manejar respuestas de estado
                     if (data.active_connections !== undefined) {
-                        log(`Estado: ${data.active_connections} conexiones activas, refrescando: ${data.is_refreshing}`, 'info');
+                        log(`Estado: ${data.active_connections} conexiones activas`, 'info');
+                        return;
+                    }
+                    
+                    // Manejar errores
+                    if (data.type === 'error') {
+                        log(`Error: ${data.message}`, 'error');
                         return;
                     }
                     
@@ -333,6 +346,16 @@
             
             ws.send(JSON.stringify({ action: 'get_status' }));
             log('Solicitando estado...', 'info');
+        }
+
+        function getData() {
+            if (!isConnected) {
+                log('No conectado', 'error');
+                return;
+            }
+            
+            ws.send(JSON.stringify({ action: 'get_data' }));
+            log('Solicitando datos del dashboard...', 'info');
         }
 
         function clearLog() {

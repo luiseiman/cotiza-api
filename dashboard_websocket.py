@@ -190,21 +190,21 @@ async def websocket_endpoint(websocket: WebSocket):
 
 def start_websocket_refresh_task():
     """Inicia la tarea de refresh en background."""
-    async def refresh_task():
-        await websocket_manager.start_refresh_loop()
-    
-    # Crear tarea en el event loop
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.create_task(refresh_task())
-    
-    # Ejecutar en thread separado
-    def run_loop():
-        loop.run_forever()
-    
-    thread = threading.Thread(target=run_loop, daemon=True)
-    thread.start()
-    print("[WS] Tarea de refresh iniciada en background")
+    try:
+        async def refresh_task():
+            await websocket_manager.start_refresh_loop()
+        
+        # Ejecutar en thread separado
+        def run_loop():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(refresh_task())
+        
+        thread = threading.Thread(target=run_loop, daemon=True)
+        thread.start()
+        print("[WS] Tarea de refresh iniciada en background")
+    except Exception as e:
+        print(f"[WS] Error iniciando refresh task: {e}")
 
 
 # =====================================================================

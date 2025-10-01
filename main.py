@@ -40,14 +40,14 @@ except Exception as e:
 
 # ---------------------------- Dashboard WebSocket ----------------------------
 try:
-    from dashboard_websocket import websocket_endpoint, start_websocket_refresh_task
+    from basic_websocket import websocket_endpoint
     
     @app.websocket("/ws/dashboard")
     async def websocket_route(websocket: WebSocket):
         await websocket_endpoint(websocket)
         
 except Exception as e:
-    print(f"[main] No se pudo incluir dashboard_websocket: {e}")
+    print(f"[main] No se pudo incluir basic_websocket: {e}")
 
 # ---------------------------- Dashboard HTML ----------------------------
 @app.get("/", response_class=RedirectResponse)
@@ -259,11 +259,7 @@ def _startup():
     except Exception as e:
         print(f"[main] No se pudo iniciar dashboard_refresh worker: {e}")
     
-    # Iniciar WebSocket refresh task (si está disponible)
-    try:
-        start_websocket_refresh_task()
-    except Exception as e:
-        print(f"[main] No se pudo iniciar websocket_refresh task: {e}")
+    # WebSocket básico no requiere tareas en background
     # No iniciar worker de ratios automáticamente, solo cuando se solicite
     print("[main] Servicio listo. Use /start para iniciar.")
     # Iniciar "dashboard" por defecto para latidos
@@ -489,8 +485,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     message = json.loads(data)
                     print(f"[websocket] Mensaje recibido: {message}")
                     
-                    # Procesar mensaje según el tipo
-                    if message.get("type") == "ping":
+                    # Normalizar comando (acepta 'type' o 'action')
+                    _cmd = (message.get("action") or message.get("type") or "").lower()
+                    
+                    # Procesar mensaje según el tipo/comando
+                    if _cmd == "ping":
                         await websocket.send_text(json.dumps({
                             "type": "pong",
                             "timestamp": time.time()
@@ -502,6 +501,37 @@ async def websocket_endpoint(websocket: WebSocket):
                             "instruments": message.get("instruments", []),
                             "timestamp": time.time()
                         }))
+                    elif _cmd in ("get_status", "dashboard_status"):
+                        # Estado básico del canal WS
+                        with _websocket_lock:
+                            conn_count = len(_websocket_connections)
+                        await websocket.send_text(json.dumps({
+                            "type": "status",
+                            "active_connections": conn_count,
+                            "timestamp": time.time()
+                        }))
+                    elif _cmd in ("get_data", "dashboard_get_data"):
+                        # Devolver datos del dashboard desde la vista materializada
+                        try:
+                            from supabase_client import supabase
+                            start_ts = time.time()
+                            resp = supabase.table("ratios_dashboard_view").select("*").execute()
+                            data_rows = resp.data or []
+                            elapsed_ms = int((time.time() - start_ts) * 1000)
+                            await websocket.send_text(json.dumps({
+                                "status": "success",
+                                "method": "materialized_view_websocket",
+                                "count": len(data_rows),
+                                "data": data_rows,
+                                "query_time_ms": elapsed_ms,
+                                "timestamp": time.time()
+                            }))
+                        except Exception as e:
+                            await websocket.send_text(json.dumps({
+                                "status": "error",
+                                "error": str(e),
+                                "timestamp": time.time()
+                            }))
                     elif message.get("type") == "orders_subscribe":
                         # Suscribir a order reports de una cuenta
                         account = message.get("account")
