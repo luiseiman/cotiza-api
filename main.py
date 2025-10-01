@@ -38,6 +38,17 @@ try:
 except Exception as e:
     print(f"[main] No se pudo incluir dashboard_ratios_api: {e}")
 
+# ---------------------------- Dashboard WebSocket ----------------------------
+try:
+    from dashboard_websocket import websocket_endpoint, start_websocket_refresh_task
+    
+    @app.websocket("/ws/dashboard")
+    async def websocket_route(websocket: WebSocket):
+        await websocket_endpoint(websocket)
+        
+except Exception as e:
+    print(f"[main] No se pudo incluir dashboard_websocket: {e}")
+
 # ---------------------------- Dashboard HTML ----------------------------
 @app.get("/", response_class=RedirectResponse)
 def root_redirect():
@@ -66,6 +77,20 @@ def dashboard_page():
       </ul>
     </body></html>
     """)
+
+@app.get("/ws-test", response_class=HTMLResponse)
+def websocket_test_page():
+    """Sirve la página de prueba del WebSocket."""
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        test_file = os.path.join(base_dir, "websocket_test.html")
+        
+        if os.path.exists(test_file):
+            return FileResponse(test_file, media_type="text/html")
+        else:
+            return HTMLResponse(content="Archivo websocket_test.html no encontrado.", status_code=404)
+    except Exception as e:
+        return HTMLResponse(content=f"Error: {e}", status_code=500)
 
 # ---------------------------- Dashboard control endpoints ----------------------------
 @app.post("/dashboard/start")
@@ -233,6 +258,12 @@ def _startup():
         start_refresh_worker()
     except Exception as e:
         print(f"[main] No se pudo iniciar dashboard_refresh worker: {e}")
+    
+    # Iniciar WebSocket refresh task (si está disponible)
+    try:
+        start_websocket_refresh_task()
+    except Exception as e:
+        print(f"[main] No se pudo iniciar websocket_refresh task: {e}")
     # No iniciar worker de ratios automáticamente, solo cuando se solicite
     print("[main] Servicio listo. Use /start para iniciar.")
     # Iniciar "dashboard" por defecto para latidos

@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard WebSocket Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .status {
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+            font-weight: bold;
+        }
+        .status.connected { background-color: #d4edda; color: #155724; }
+        .status.disconnected { background-color: #f8d7da; color: #721c24; }
+        .status.connecting { background-color: #fff3cd; color: #856404; }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+        .stat-card {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 6px;
+            border-left: 4px solid #007bff;
+        }
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #007bff;
+        }
+        .stat-label {
+            font-size: 14px;
+            color: #6c757d;
+            margin-top: 5px;
+        }
+        .controls {
+            margin: 20px 0;
+            padding: 15px;
+            background: #e9ecef;
+            border-radius: 6px;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover { background: #0056b3; }
+        button:disabled { background: #6c757d; cursor: not-allowed; }
+        .data-table {
+            margin-top: 20px;
+            max-height: 400px;
+            overflow-y: auto;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            padding: 8px 12px;
+            text-align: left;
+            border-bottom: 1px solid #dee2e6;
+        }
+        th {
+            background: #f8f9fa;
+            font-weight: bold;
+            position: sticky;
+            top: 0;
+        }
+        .log {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            padding: 10px;
+            margin-top: 20px;
+            max-height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .log-entry {
+            margin: 2px 0;
+            padding: 2px 0;
+        }
+        .log-entry.info { color: #007bff; }
+        .log-entry.success { color: #28a745; }
+        .log-entry.error { color: #dc3545; }
+        .log-entry.warning { color: #ffc107; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📊 Dashboard WebSocket Test</h1>
+        
+        <div id="connectionStatus" class="status disconnected">
+            🔴 Desconectado
+        </div>
+        
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-value" id="recordCount">0</div>
+                <div class="stat-label">Registros</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="queryTime">0</div>
+                <div class="stat-label">Tiempo Query (ms)</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="updateCount">0</div>
+                <div class="stat-label">Actualizaciones</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="lastUpdate">--:--:--</div>
+                <div class="stat-label">Última Actualización</div>
+            </div>
+        </div>
+        
+        <div class="controls">
+            <button id="connectBtn" onclick="connect()">🔌 Conectar</button>
+            <button id="disconnectBtn" onclick="disconnect()" disabled>🔌 Desconectar</button>
+            <button onclick="sendPing()">📡 Ping</button>
+            <button onclick="getStatus()">📊 Estado</button>
+            <button onclick="clearLog()">🗑️ Limpiar Log</button>
+        </div>
+        
+        <div class="data-table">
+            <table id="dataTable">
+                <thead>
+                    <tr>
+                        <th>Par</th>
+                        <th>Client ID</th>
+                        <th>Último Ratio</th>
+                        <th>Promedio Rueda</th>
+                        <th>Dif Rueda %</th>
+                        <th>Promedio Día Anterior</th>
+                        <th>Dif Día Anterior %</th>
+                    </tr>
+                </thead>
+                <tbody id="dataTableBody">
+                    <tr><td colspan="7" style="text-align: center; color: #6c757d;">Sin datos</td></tr>
+                </tbody>
+            </table>
+        </div>
+        
+        <div class="log" id="logContainer">
+            <div class="log-entry info">[INFO] Página cargada. Listo para conectar.</div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let updateCount = 0;
+        let isConnected = false;
+
+        function log(message, type = 'info') {
+            const logContainer = document.getElementById('logContainer');
+            const timestamp = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.textContent = `[${timestamp}] ${message}`;
+            logContainer.appendChild(entry);
+            logContainer.scrollTop = logContainer.scrollHeight;
+        }
+
+        function updateConnectionStatus(status, message) {
+            const statusEl = document.getElementById('connectionStatus');
+            const connectBtn = document.getElementById('connectBtn');
+            const disconnectBtn = document.getElementById('disconnectBtn');
+            
+            statusEl.className = `status ${status}`;
+            statusEl.textContent = message;
+            
+            if (status === 'connected') {
+                connectBtn.disabled = true;
+                disconnectBtn.disabled = false;
+                isConnected = true;
+            } else {
+                connectBtn.disabled = false;
+                disconnectBtn.disabled = true;
+                isConnected = false;
+            }
+        }
+
+        function updateStats(data) {
+            document.getElementById('recordCount').textContent = data.count || 0;
+            document.getElementById('queryTime').textContent = data.query_time_ms || 0;
+            document.getElementById('updateCount').textContent = updateCount;
+            document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+        }
+
+        function updateTable(data) {
+            const tbody = document.getElementById('dataTableBody');
+            
+            if (!data.data || data.data.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #6c757d;">Sin datos</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = '';
+            
+            // Mostrar solo los primeros 20 registros para performance
+            const displayData = data.data.slice(0, 20);
+            
+            displayData.forEach(row => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${row.par || 'N/A'}</td>
+                    <td>${row.client_id_result || 'N/A'}</td>
+                    <td>${row.ultimo_ratio_operado ? row.ultimo_ratio_operado.toFixed(5) : 'N/A'}</td>
+                    <td>${row.promedio_rueda ? row.promedio_rueda.toFixed(5) : 'N/A'}</td>
+                    <td>${row.dif_rueda_pct !== null ? row.dif_rueda_pct.toFixed(2) + '%' : 'N/A'}</td>
+                    <td>${row.promedio_dia_anterior ? row.promedio_dia_anterior.toFixed(5) : 'N/A'}</td>
+                    <td>${row.dif_dia_anterior_pct !== null ? row.dif_dia_anterior_pct.toFixed(2) + '%' : 'N/A'}</td>
+                `;
+                tbody.appendChild(tr);
+            });
+
+            if (data.data.length > 20) {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `<td colspan="7" style="text-align: center; color: #6c757d;">... y ${data.data.length - 20} registros más</td>`;
+                tbody.appendChild(tr);
+            }
+        }
+
+        function connect() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                log('Ya conectado', 'warning');
+                return;
+            }
+
+            updateConnectionStatus('connecting', '🟡 Conectando...');
+            log('Conectando a WebSocket...', 'info');
+
+            // Determinar la URL del WebSocket
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws/dashboard`;
+            
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = function(event) {
+                updateConnectionStatus('connected', '🟢 Conectado');
+                log('Conectado exitosamente', 'success');
+                updateCount = 0;
+            };
+
+            ws.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    
+                    if (data.action === 'pong') {
+                        log('Pong recibido', 'success');
+                        return;
+                    }
+                    
+                    if (data.status === 'success') {
+                        updateStats(data);
+                        updateTable(data);
+                        updateCount++;
+                        log(`Datos actualizados: ${data.count} registros, ${data.query_time_ms}ms`, 'success');
+                    } else {
+                        log(`Error en datos: ${data.error}`, 'error');
+                    }
+                } catch (e) {
+                    log(`Error parseando mensaje: ${e.message}`, 'error');
+                }
+            };
+
+            ws.onclose = function(event) {
+                updateConnectionStatus('disconnected', '🔴 Desconectado');
+                log(`Conexión cerrada: ${event.code} - ${event.reason}`, 'warning');
+                ws = null;
+            };
+
+            ws.onerror = function(error) {
+                updateConnectionStatus('disconnected', '🔴 Error de conexión');
+                log(`Error de WebSocket: ${error}`, 'error');
+            };
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+        }
+
+        function sendPing() {
+            if (!isConnected) {
+                log('No conectado', 'error');
+                return;
+            }
+            
+            ws.send(JSON.stringify({ action: 'ping' }));
+            log('Ping enviado', 'info');
+        }
+
+        function getStatus() {
+            if (!isConnected) {
+                log('No conectado', 'error');
+                return;
+            }
+            
+            ws.send(JSON.stringify({ action: 'get_status' }));
+            log('Solicitando estado...', 'info');
+        }
+
+        function clearLog() {
+            document.getElementById('logContainer').innerHTML = '';
+            log('Log limpiado', 'info');
+        }
+
+        // Auto-conectar al cargar la página
+        window.onload = function() {
+            log('Página cargada. Haz clic en "Conectar" para comenzar.', 'info');
+        };
+    </script>
+</body>
+</html>
