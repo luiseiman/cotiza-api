@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard de Ratios - Tiempo Real</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+
+        header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+        }
+
+        .status {
+            background: #f8f9fa;
+            padding: 15px 30px;
+            border-bottom: 2px solid #e9ecef;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-label {
+            font-weight: 600;
+            color: #495057;
+        }
+
+        .status-value {
+            color: #6c757d;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 60px;
+            font-size: 1.5rem;
+            color: #6c757d;
+        }
+
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 20px;
+            margin: 20px;
+            border-radius: 8px;
+            border-left: 4px solid #f5c6cb;
+        }
+
+        .table-container {
+            overflow-x: auto;
+            padding: 20px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.95rem;
+        }
+
+        thead {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        th {
+            padding: 15px 12px;
+            text-align: left;
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.85rem;
+            letter-spacing: 0.5px;
+        }
+
+        td {
+            padding: 15px 12px;
+            border-bottom: 1px solid #e9ecef;
+        }
+
+        tbody tr {
+            transition: background-color 0.2s;
+        }
+
+        tbody tr:hover {
+            background-color: #f8f9fa;
+        }
+
+        .par-cell {
+            font-weight: 700;
+            color: #495057;
+            font-size: 1.05rem;
+        }
+
+        .ratio-cell {
+            font-family: 'Courier New', monospace;
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #212529;
+        }
+
+        .metric-cell {
+            text-align: center;
+        }
+
+        .metric-value {
+            font-family: 'Courier New', monospace;
+            font-size: 0.95rem;
+            display: block;
+            margin-bottom: 4px;
+        }
+
+        .metric-diff {
+            font-size: 0.85rem;
+            font-weight: 600;
+            padding: 3px 8px;
+            border-radius: 4px;
+            display: inline-block;
+        }
+
+        .positive {
+            color: #28a745;
+            background: #d4edda;
+        }
+
+        .negative {
+            color: #dc3545;
+            background: #f8d7da;
+        }
+
+        .neutral {
+            color: #6c757d;
+            background: #e9ecef;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .badge-success {
+            background: #28a745;
+            color: white;
+        }
+
+        .badge-warning {
+            background: #ffc107;
+            color: #212529;
+        }
+
+        footer {
+            background: #f8f9fa;
+            padding: 20px;
+            text-align: center;
+            color: #6c757d;
+            font-size: 0.9rem;
+            border-top: 2px solid #e9ecef;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .updating {
+            animation: pulse 1.5s infinite;
+        }
+
+        @media (max-width: 768px) {
+            h1 {
+                font-size: 1.8rem;
+            }
+
+            .status {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+
+            table {
+                font-size: 0.85rem;
+            }
+
+            th, td {
+                padding: 10px 8px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📊 Dashboard de Ratios</h1>
+            <p>Actualización en tiempo real cada 10 segundos</p>
+        </header>
+
+        <div class="status" id="status">
+            <div class="status-item">
+                <span class="status-label">Estado:</span>
+                <span class="status-value" id="connection-status">Conectando...</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Última actualización:</span>
+                <span class="status-value" id="last-update">-</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Pares:</span>
+                <span class="status-value" id="pair-count">0</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Tiempo de respuesta:</span>
+                <span class="status-value" id="query-time">-</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Método:</span>
+                <span class="status-value" id="method">-</span>
+            </div>
+        </div>
+
+        <div id="loading" class="loading">
+            🔄 Cargando datos...
+        </div>
+
+        <div id="error" class="error" style="display: none;"></div>
+
+        <div class="table-container" id="table-container" style="display: none;">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Par</th>
+                        <th style="text-align: center;">Último Ratio</th>
+                        <th style="text-align: center;">Rueda Anterior</th>
+                        <th style="text-align: center;">1 Semana</th>
+                        <th style="text-align: center;">1 Mes</th>
+                        <th style="text-align: center;">Mín Mensual</th>
+                        <th style="text-align: center;">Máx Mensual</th>
+                    </tr>
+                </thead>
+                <tbody id="ratios-body"></tbody>
+            </table>
+        </div>
+
+        <footer>
+            <p>💡 Los datos se actualizan automáticamente cada 10 segundos</p>
+            <p>🚀 API: <code>http://localhost:8000/api/ratios/dashboard</code></p>
+        </footer>
+    </div>
+
+    <script>
+        // Configuración
+        const API_URL = 'http://localhost:8000/api/ratios/dashboard';
+        const REFRESH_INTERVAL = 10000; // 10 segundos
+
+        // Referencias a elementos
+        const loading = document.getElementById('loading');
+        const error = document.getElementById('error');
+        const tableContainer = document.getElementById('table-container');
+        const tbody = document.getElementById('ratios-body');
+        const connectionStatus = document.getElementById('connection-status');
+        const lastUpdate = document.getElementById('last-update');
+        const pairCount = document.getElementById('pair-count');
+        const queryTime = document.getElementById('query-time');
+        const methodSpan = document.getElementById('method');
+
+        let updateInterval = null;
+
+        // Función principal para obtener datos
+        async function fetchRatios() {
+            try {
+                const response = await fetch(API_URL);
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+
+                if (data.status === 'success') {
+                    updateTable(data.data);
+                    updateStatus(data);
+                    hideError();
+                    connectionStatus.innerHTML = '🟢 Conectado';
+                } else {
+                    throw new Error(data.message || 'Error desconocido');
+                }
+            } catch (err) {
+                showError(`Error al obtener datos: ${err.message}`);
+                connectionStatus.innerHTML = '🔴 Error de conexión';
+            }
+        }
+
+        // Actualizar tabla
+        function updateTable(ratios) {
+            loading.style.display = 'none';
+            tableContainer.style.display = 'block';
+
+            tbody.innerHTML = ratios.map(ratio => `
+                <tr>
+                    <td class="par-cell">${ratio.par}</td>
+                    <td class="ratio-cell" style="text-align: center;">${formatNumber(ratio.ultimo_ratio_operado)}</td>
+                    ${formatMetricCell(ratio.promedio_rueda, ratio.dif_rueda_pct)}
+                    ${formatMetricCell(ratio.promedio_1semana, ratio.dif_1semana_pct)}
+                    ${formatMetricCell(ratio.promedio_1mes, ratio.dif_1mes_pct)}
+                    <td class="metric-cell">
+                        <span class="metric-value">${formatNumber(ratio.minimo_mensual)}</span>
+                        <span class="metric-diff neutral">${formatPercent(ratio.dif_minimo_pct)}</span>
+                    </td>
+                    <td class="metric-cell">
+                        <span class="metric-value">${formatNumber(ratio.maximo_mensual)}</span>
+                        <span class="metric-diff neutral">${formatPercent(ratio.dif_maximo_pct)}</span>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        // Actualizar información de estado
+        function updateStatus(data) {
+            lastUpdate.textContent = new Date().toLocaleTimeString('es-AR');
+            pairCount.textContent = data.count;
+            queryTime.textContent = `${data.query_time_ms.toFixed(2)}ms`;
+            methodSpan.textContent = data.method;
+        }
+
+        // Formatear celda de métrica
+        function formatMetricCell(value, diffPct) {
+            const colorClass = getColorClass(diffPct);
+            return `
+                <td class="metric-cell">
+                    <span class="metric-value">${formatNumber(value)}</span>
+                    <span class="metric-diff ${colorClass}">${formatPercent(diffPct)}</span>
+                </td>
+            `;
+        }
+
+        // Formatear número
+        function formatNumber(value) {
+            return value != null ? value.toFixed(5) : 'N/A';
+        }
+
+        // Formatear porcentaje
+        function formatPercent(value) {
+            if (value == null) return 'N/A';
+            const sign = value >= 0 ? '+' : '';
+            return `${sign}${value.toFixed(2)}%`;
+        }
+
+        // Obtener clase de color
+        function getColorClass(value) {
+            if (value == null) return 'neutral';
+            return value >= 0 ? 'positive' : 'negative';
+        }
+
+        // Mostrar error
+        function showError(message) {
+            error.textContent = message;
+            error.style.display = 'block';
+            loading.style.display = 'none';
+        }
+
+        // Ocultar error
+        function hideError() {
+            error.style.display = 'none';
+        }
+
+        // Inicialización
+        function init() {
+            console.log('🚀 Iniciando dashboard...');
+            console.log(`📡 API URL: ${API_URL}`);
+            console.log(`⏱️  Intervalo de actualización: ${REFRESH_INTERVAL}ms`);
+
+            // Primera carga
+            fetchRatios();
+
+            // Actualización periódica
+            updateInterval = setInterval(fetchRatios, REFRESH_INTERVAL);
+
+            // Limpiar al cerrar la página
+            window.addEventListener('beforeunload', () => {
+                if (updateInterval) {
+                    clearInterval(updateInterval);
+                }
+            });
+        }
+
+        // Iniciar cuando el DOM esté listo
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', init);
+        } else {
+            init();
+        }
+    </script>
+</body>
+</html>
+

@@ -187,6 +187,9 @@ def _worker_loop():
                 mid_B = ((float(B_bid)+float(B_ask))/2.0) if (_is_num(B_bid) and _is_num(B_ask)) else (float(B_last) if _is_num(B_last) else None)
                 mid_ratio = _safe_div(mid_A, mid_B)
 
+                # --- Ratio desde últimos valores operados (last)
+                last_ratio = _safe_div(A_last, B_last) if (_is_num(A_last) and _is_num(B_last)) else None
+
                 if not any(x is not None for x in (mid_ratio, bid_ratio, ask_ratio)):
                     print(f"[ratios_worker] ❌ No se pudo calcular ningún ratio para {base_symbol}/{quote_symbol}")
                     continue
@@ -244,12 +247,15 @@ def _worker_loop():
                     "mid_ratio":      float(mid_ratio)   if _is_num(mid_ratio)   else None,
                     "bid_ratio":      float(bid_ratio)   if _is_num(bid_ratio)   else None,
                     "ask_ratio":      float(ask_ratio)   if _is_num(ask_ratio)   else None,
+                    "last_ratio":     float(last_ratio)  if _is_num(last_ratio)  else None,
 
                     # Precios crudos
                     "bid_price_base":   float(A_bid) if _is_num(A_bid) else None,
                     "bid_price_quote":  float(B_bid) if _is_num(B_bid) else None,
                     "offer_price_base": float(A_ask) if _is_num(A_ask) else None,
                     "offer_price_quote":float(B_ask) if _is_num(B_ask) else None,
+                    "last_price_base":  float(A_last) if _is_num(A_last) else None,
+                    "last_price_quote": float(B_last) if _is_num(B_last) else None,
 
                     # Tamaños
                     "bid_size_base":    A_bid_sz,
