@@ -96,9 +96,16 @@ WHERE tablename = 'terminal_ratios_history' AND indexname LIKE 'idx_%';
 En SQL Editor, crear **nueva query** y copiar esto:
 
 ```sql
--- Vista materializada para dashboard
+-- Vista materializada para dashboard (incluye Día Hábil Anterior)
 CREATE MATERIALIZED VIEW IF NOT EXISTS ratios_dashboard_view AS
-WITH ultimo_ratio AS (
+WITH prev_biz_date AS (
+    SELECT CASE 
+        WHEN EXTRACT(DOW FROM NOW()) = 1 THEN (NOW()::date - INTERVAL '3 days')::date  -- Lunes → Viernes
+        WHEN EXTRACT(DOW FROM NOW()) = 0 THEN (NOW()::date - INTERVAL '2 days')::date  -- Domingo → Viernes
+        ELSE (NOW()::date - INTERVAL '1 day')::date                                    -- Otro día → Ayer
+    END AS prev_date
+),
+ultimo_ratio AS (
     SELECT DISTINCT ON (base_symbol, quote_symbol, user_id)
         base_symbol,
         quote_symbol,
@@ -115,6 +122,7 @@ promedios AS (
         quote_symbol,
         user_id,
         AVG(CASE WHEN asof > NOW() - INTERVAL '24 hours' THEN last_ratio END) as promedio_rueda,
+        AVG(CASE WHEN asof::date = (SELECT prev_date FROM prev_biz_date) THEN last_ratio END) as promedio_dia_anterior,
         AVG(CASE WHEN asof > NOW() - INTERVAL '7 days' THEN last_ratio END) as promedio_1semana,
         AVG(CASE WHEN asof > NOW() - INTERVAL '30 days' THEN last_ratio END) as promedio_1mes,
         MIN(CASE WHEN asof > NOW() - INTERVAL '30 days' THEN last_ratio END) as minimo_mensual,
@@ -129,6 +137,8 @@ SELECT
     u.ultimo_timestamp,
     ROUND(p.promedio_rueda::numeric, 5) as promedio_rueda,
     ROUND((((u.ultimo_ratio_operado - p.promedio_rueda) / p.promedio_rueda) * 100)::numeric, 2) as dif_rueda_pct,
+    ROUND(p.promedio_dia_anterior::numeric, 5) as promedio_dia_anterior,
+    ROUND((((u.ultimo_ratio_operado - p.promedio_dia_anterior) / p.promedio_dia_anterior) * 100)::numeric, 2) as dif_dia_anterior_pct,
     ROUND(p.promedio_1semana::numeric, 5) as promedio_1semana,
     ROUND((((u.ultimo_ratio_operado - p.promedio_1semana) / p.promedio_1semana) * 100)::numeric, 2) as dif_1semana_pct,
     ROUND(p.promedio_1mes::numeric, 5) as promedio_1mes,

@@ -82,10 +82,13 @@ async def get_dashboard_balanced() -> Dict[str, Any]:
     """
     Obtiene datos del dashboard usando función PostgreSQL optimizada.
     
+    NOTA: Usa la vista ratios_dashboard_with_client_id para evitar error de ambigüedad con client_id.
+    
     Ventajas:
     - Datos en tiempo real
     - Rápido (100-500ms)
     - No requiere refresh
+    - Incluye client_id para separación por cliente
     
     Desventajas:
     - Más lento que vista materializada
@@ -94,8 +97,8 @@ async def get_dashboard_balanced() -> Dict[str, Any]:
     try:
         start = time.time()
         
-        # Llamar a la función PostgreSQL
-        response = supabase.rpc("get_ratios_dashboard").execute()
+        # Llamar a la vista que evita ambigüedad con client_id
+        response = supabase.table("ratios_dashboard_with_client_id").select("*").execute()
         
         elapsed = (time.time() - start) * 1000
         
@@ -139,55 +142,41 @@ async def get_dashboard_flexible() -> Dict[str, Any]:
     try:
         start = time.time()
         
-        # Obtener todos los pares únicos
-        pairs_response = supabase.table("terminal_ratios_history")\
-            .select("base_symbol, quote_symbol, user_id")\
-            .not_.is_("last_ratio", "null")\
-            .execute()
-        
-        if not pairs_response.data:
-            return {"status": "success", "data": [], "count": 0}
-        
-        # Obtener pares únicos
-        unique_pairs = []
-        seen = set()
-        for row in pairs_response.data:
-            key = (row["base_symbol"], row["quote_symbol"], row.get("user_id"))
-            if key not in seen:
-                seen.add(key)
-                unique_pairs.append(row)
-        
-        # Procesar cada par
-        results = []
+        # Helper: ejecución con reintentos para manejar EAGAIN/transitorios
+        def _execute_with_retry(q, retries: int = 3, delay: float = 0.5):
+            for i in range(retries):
+                try:
+                    return q.execute()
+                except Exception as e:
+                    msg = str(e)
+                    if "Resource temporarily unavailable" in msg and i < retries - 1:
+                        time_module.sleep(delay * (i + 1))
+                        continue
+                    raise
+
+        # Un solo query: últimos 30 días, todos los pares, para evitar N+1
         now = datetime.utcnow()
-        
-        for pair in unique_pairs:
-            base = pair["base_symbol"]
-            quote = pair["quote_symbol"]
-            user_id = pair.get("user_id")
-            
-            # Obtener últimos 30 días de datos
-            query = supabase.table("terminal_ratios_history")\
-                .select("last_ratio, asof")\
-                .eq("base_symbol", base)\
-                .eq("quote_symbol", quote)\
-                .not_.is_("last_ratio", "null")\
-                .gte("asof", (now - timedelta(days=30)).isoformat())\
-                .order("asof", desc=False)
-            
-            if user_id:
-                query = query.eq("user_id", user_id)
-            
-            data_response = query.execute()
-            
-            if not data_response.data:
-                continue
-            
-            # Convertir a lista de (timestamp, ratio)
-            data_points = [
-                (datetime.fromisoformat(row["asof"].replace("Z", "+00:00")), row["last_ratio"])
-                for row in data_response.data
-            ]
+        base_query = supabase.table("terminal_ratios_history")\
+            .select("base_symbol, quote_symbol, user_id, last_ratio, asof")\
+            .not_.is_("last_ratio", "null")\
+            .gte("asof", (now - timedelta(days=30)).isoformat())\
+            .order("asof", desc=False)
+
+        data_response = _execute_with_retry(base_query)
+        if not data_response.data:
+            return {"status": "success", "data": [], "count": 0}
+
+        # Agrupar en memoria por (base, quote, user_id)
+        grouped = {}
+        for row in data_response.data:
+            key = (row["base_symbol"], row["quote_symbol"], row.get("user_id"))
+            grouped.setdefault(key, []).append(
+                (datetime.fromisoformat(row["asof"].replace("Z", "+00:00")), row["last_ratio"]) 
+            )
+
+        # Procesar cada grupo
+        results = []
+        for (base, quote, user_id), data_points in grouped.items():
             
             # Último ratio
             ultimo_ratio = data_points[-1][1] if data_points else None
@@ -200,11 +189,24 @@ async def get_dashboard_flexible() -> Dict[str, Any]:
             semana_cutoff = now - timedelta(days=7)
             mes_cutoff = now - timedelta(days=30)
             
+            # Calcular fecha de negocio anterior (simple: fin de semana salta a viernes)
+            def get_prev_biz_date(dt: datetime) -> datetime:
+                dow = dt.weekday()  # 0=Lun ... 6=Dom
+                if dow == 0:  # Lunes → viernes
+                    return (dt - timedelta(days=3)).date()
+                elif dow == 6:  # Domingo → viernes
+                    return (dt - timedelta(days=2)).date()
+                else:
+                    return (dt - timedelta(days=1)).date()
+            prev_biz = get_prev_biz_date(now)
+            
             ratios_rueda = [r for t, r in data_points if t >= rueda_cutoff]
+            ratios_prev_biz = [r for t, r in data_points if t.date() == prev_biz]
             ratios_semana = [r for t, r in data_points if t >= semana_cutoff]
             ratios_mes = [r for t, r in data_points if t >= mes_cutoff]
             
             promedio_rueda = sum(ratios_rueda) / len(ratios_rueda) if ratios_rueda else None
+            promedio_prev_biz = sum(ratios_prev_biz) / len(ratios_prev_biz) if ratios_prev_biz else None
             promedio_semana = sum(ratios_semana) / len(ratios_semana) if ratios_semana else None
             promedio_mes = sum(ratios_mes) / len(ratios_mes) if ratios_mes else None
             
@@ -222,6 +224,8 @@ async def get_dashboard_flexible() -> Dict[str, Any]:
                 "ultimo_ratio_operado": round(ultimo_ratio, 5),
                 "promedio_rueda": round(promedio_rueda, 5) if promedio_rueda else None,
                 "dif_rueda_pct": calc_diff_pct(ultimo_ratio, promedio_rueda),
+                "promedio_dia_anterior": round(promedio_prev_biz, 5) if promedio_prev_biz else None,
+                "dif_dia_anterior_pct": calc_diff_pct(ultimo_ratio, promedio_prev_biz),
                 "promedio_1semana": round(promedio_semana, 5) if promedio_semana else None,
                 "dif_1semana_pct": calc_diff_pct(ultimo_ratio, promedio_semana),
                 "promedio_1mes": round(promedio_mes, 5) if promedio_mes else None,
