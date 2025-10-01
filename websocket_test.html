@@ -142,6 +142,8 @@
             <button onclick="sendPing()">📡 Ping</button>
             <button onclick="getStatus()">📊 Estado</button>
             <button onclick="getData()">📈 Datos</button>
+            <button id="subscribeBtn" onclick="subscribeDashboard()">📺 Suscribir</button>
+            <button id="unsubscribeBtn" onclick="unsubscribeDashboard()" disabled>📺 Desuscribir</button>
             <button onclick="clearLog()">🗑️ Limpiar Log</button>
         </div>
         
@@ -173,6 +175,7 @@
         let ws = null;
         let updateCount = 0;
         let isConnected = false;
+        let isSubscribed = false;
 
         function log(message, type = 'info') {
             const logContainer = document.getElementById('logContainer');
@@ -200,7 +203,9 @@
                 connectBtn.disabled = false;
                 disconnectBtn.disabled = true;
                 isConnected = false;
+                isSubscribed = false;
             }
+            updateSubscriptionButtons();
         }
 
         function updateStats(data) {
@@ -293,13 +298,32 @@
                         return;
                     }
                     
-                    // Manejar datos del dashboard
-                    if (data.status === 'success') {
+                    // Manejar datos del dashboard automáticos
+                    if (data.type === 'dashboard_data') {
                         updateStats(data);
                         updateTable(data);
                         updateCount++;
-                        log(`Datos actualizados: ${data.count} registros, ${data.query_time_ms}ms`, 'success');
-                    } else if (data.status === 'error') {
+                        log(`📺 Datos automáticos: ${data.count} registros, ${data.query_time_ms}ms`, 'success');
+                    }
+                    // Manejar datos del dashboard bajo demanda
+                    else if (data.status === 'success') {
+                        updateStats(data);
+                        updateTable(data);
+                        updateCount++;
+                        log(`📈 Datos solicitados: ${data.count} registros, ${data.query_time_ms}ms`, 'success');
+                    } 
+                    // Manejar confirmaciones de suscripción
+                    else if (data.type === 'dashboard_subscribed') {
+                        isSubscribed = true;
+                        updateSubscriptionButtons();
+                        log(`📺 ${data.message}`, 'success');
+                    }
+                    else if (data.type === 'dashboard_unsubscribed') {
+                        isSubscribed = false;
+                        updateSubscriptionButtons();
+                        log(`📺 ${data.message}`, 'success');
+                    }
+                    else if (data.status === 'error') {
                         log(`Error en datos: ${data.error}`, 'error');
                     } else {
                         log(`Mensaje no reconocido: ${JSON.stringify(data)}`, 'warning');
@@ -356,6 +380,39 @@
             
             ws.send(JSON.stringify({ action: 'get_data' }));
             log('Solicitando datos del dashboard...', 'info');
+        }
+
+        function subscribeDashboard() {
+            if (!isConnected) {
+                log('No conectado', 'error');
+                return;
+            }
+            
+            ws.send(JSON.stringify({ action: 'dashboard_subscribe' }));
+            log('Solicitando suscripción al dashboard...', 'info');
+        }
+
+        function unsubscribeDashboard() {
+            if (!isConnected) {
+                log('No conectado', 'error');
+                return;
+            }
+            
+            ws.send(JSON.stringify({ action: 'dashboard_unsubscribe' }));
+            log('Solicitando desuscripción del dashboard...', 'info');
+        }
+
+        function updateSubscriptionButtons() {
+            const subscribeBtn = document.getElementById('subscribeBtn');
+            const unsubscribeBtn = document.getElementById('unsubscribeBtn');
+            
+            if (isSubscribed) {
+                subscribeBtn.disabled = true;
+                unsubscribeBtn.disabled = false;
+            } else {
+                subscribeBtn.disabled = false;
+                unsubscribeBtn.disabled = true;
+            }
         }
 
         function clearLog() {

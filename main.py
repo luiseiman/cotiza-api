@@ -456,6 +456,125 @@ _websocket_connections = []
 _websocket_lock = threading.Lock()
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
 
+# Dashboard subscribers
+_dashboard_subscribers = []
+_dashboard_lock = threading.Lock()
+_last_dashboard_data = None
+_last_dashboard_update = None
+
+
+async def _broadcast_dashboard_data():
+    """Envía datos del dashboard a todos los suscriptores."""
+    global _last_dashboard_data, _last_dashboard_update
+    
+    try:
+        from supabase_client import supabase
+        start_ts = time.time()
+        resp = supabase.table("ratios_dashboard_view").select("*").execute()
+        data_rows = resp.data or []
+        elapsed_ms = int((time.time() - start_ts) * 1000)
+        
+        dashboard_payload = {
+            "type": "dashboard_data",
+            "status": "success",
+            "method": "materialized_view_websocket",
+            "count": len(data_rows),
+            "data": data_rows,
+            "query_time_ms": elapsed_ms,
+            "timestamp": time.time()
+        }
+        
+        # Guardar datos para nuevos suscriptores
+        _last_dashboard_data = dashboard_payload
+        _last_dashboard_update = time.time()
+        
+        # Enviar a todos los suscriptores activos
+        with _dashboard_lock:
+            active_subscribers = []
+            for ws in _dashboard_subscribers:
+                try:
+                    await ws.send_text(json.dumps(dashboard_payload))
+                    active_subscribers.append(ws)
+                except Exception:
+                    # Conexión cerrada, remover
+                    pass
+            _dashboard_subscribers[:] = active_subscribers
+            
+        print(f"[dashboard] Datos enviados a {len(active_subscribers)} suscriptores")
+        
+    except Exception as e:
+        error_payload = {
+            "type": "dashboard_error",
+            "status": "error",
+            "error": str(e),
+            "timestamp": time.time()
+        }
+        
+        with _dashboard_lock:
+            active_subscribers = []
+            for ws in _dashboard_subscribers:
+                try:
+                    await ws.send_text(json.dumps(error_payload))
+                    active_subscribers.append(ws)
+                except Exception:
+                    pass
+            _dashboard_subscribers[:] = active_subscribers
+
+
+def _start_dashboard_broadcast_worker():
+    """Inicia el worker que envía datos del dashboard cada 10 segundos."""
+    def worker():
+        while True:
+            try:
+                if _dashboard_subscribers:  # Solo si hay suscriptores
+                    # Usar el event loop global si está disponible
+                    if _event_loop:
+                        asyncio.run_coroutine_threadsafe(_broadcast_dashboard_data(), _event_loop)
+                    else:
+                        # Crear un nuevo loop si no hay uno global
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        loop.run_until_complete(_broadcast_dashboard_data())
+                        loop.close()
+            except Exception as e:
+                print(f"[dashboard] Error en worker: {e}")
+            
+            time.sleep(10)  # Actualizar cada 10 segundos
+    
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    print("[dashboard] Worker de broadcast iniciado (cada 10 segundos)")
+
+
+def _subscribe_to_dashboard(websocket):
+    """Suscribe un WebSocket a los datos del dashboard."""
+    with _dashboard_lock:
+        if websocket not in _dashboard_subscribers:
+            _dashboard_subscribers.append(websocket)
+            print(f"[dashboard] Nuevo suscriptor. Total: {len(_dashboard_subscribers)}")
+            
+            # Si es el primer suscriptor, iniciar el worker
+            if len(_dashboard_subscribers) == 1:
+                _start_dashboard_broadcast_worker()
+            
+            # Enviar datos actuales inmediatamente si están disponibles
+            if _last_dashboard_data:
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        websocket.send_text(json.dumps(_last_dashboard_data)), 
+                        _event_loop or asyncio.get_event_loop()
+                    )
+                except Exception:
+                    pass
+
+
+def _unsubscribe_from_dashboard(websocket):
+    """Desuscribe un WebSocket de los datos del dashboard."""
+    with _dashboard_lock:
+        if websocket in _dashboard_subscribers:
+            _dashboard_subscribers.remove(websocket)
+            print(f"[dashboard] Suscriptor removido. Total: {len(_dashboard_subscribers)}")
+
 @app.websocket("/ws/cotizaciones")
 async def websocket_endpoint(websocket: WebSocket):
     """Endpoint WebSocket para cotizaciones en tiempo real"""
@@ -532,6 +651,22 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "error": str(e),
                                 "timestamp": time.time()
                             }))
+                    elif _cmd in ("dashboard_subscribe", "subscribe_dashboard"):
+                        # Suscribirse a datos automáticos del dashboard
+                        _subscribe_to_dashboard(websocket)
+                        await websocket.send_text(json.dumps({
+                            "type": "dashboard_subscribed",
+                            "message": "Suscripción al dashboard activa - recibirás datos cada 10 segundos",
+                            "timestamp": time.time()
+                        }))
+                    elif _cmd in ("dashboard_unsubscribe", "unsubscribe_dashboard"):
+                        # Desuscribirse de los datos automáticos del dashboard
+                        _unsubscribe_from_dashboard(websocket)
+                        await websocket.send_text(json.dumps({
+                            "type": "dashboard_unsubscribed",
+                            "message": "Suscripción al dashboard desactivada",
+                            "timestamp": time.time()
+                        }))
                     elif message.get("type") == "orders_subscribe":
                         # Suscribir a order reports de una cuenta
                         account = message.get("account")
@@ -618,6 +753,10 @@ async def websocket_endpoint(websocket: WebSocket):
         with _websocket_lock:
             if websocket in _websocket_connections:
                 _websocket_connections.remove(websocket)
+        
+        # Remover de suscriptores del dashboard
+        _unsubscribe_from_dashboard(websocket)
+        
         print(f"[websocket] Conexión cerrada: {websocket.client.host}:{websocket.client.port}")
 
 
