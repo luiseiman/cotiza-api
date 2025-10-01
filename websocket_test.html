@@ -268,18 +268,28 @@
                 try {
                     const data = JSON.parse(event.data);
                     
+                    // Manejar respuestas a comandos
                     if (data.action === 'pong') {
                         log('Pong recibido', 'success');
                         return;
                     }
                     
+                    // Manejar respuestas de estado
+                    if (data.active_connections !== undefined) {
+                        log(`Estado: ${data.active_connections} conexiones activas, refrescando: ${data.is_refreshing}`, 'info');
+                        return;
+                    }
+                    
+                    // Manejar datos del dashboard
                     if (data.status === 'success') {
                         updateStats(data);
                         updateTable(data);
                         updateCount++;
                         log(`Datos actualizados: ${data.count} registros, ${data.query_time_ms}ms`, 'success');
-                    } else {
+                    } else if (data.status === 'error') {
                         log(`Error en datos: ${data.error}`, 'error');
+                    } else {
+                        log(`Mensaje no reconocido: ${JSON.stringify(data)}`, 'warning');
                     }
                 } catch (e) {
                     log(`Error parseando mensaje: ${e.message}`, 'error');
