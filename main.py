@@ -506,6 +506,10 @@ _websocket_connections = []
 _websocket_lock = threading.Lock()
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
 
+# Límites de seguridad para conexiones
+MAX_WEBSOCKET_CONNECTIONS = 100  # Máximo 100 conexiones WebSocket
+MAX_DASHBOARD_SUBSCRIBERS = 50   # Máximo 50 suscriptores del dashboard
+
 # Dashboard subscribers
 _dashboard_subscribers = []
 _dashboard_lock = threading.Lock()
@@ -670,9 +674,15 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.accept()
         print(f"[websocket] Nueva conexión desde {websocket.client.host}:{websocket.client.port}")
         
-        # Agregar a la lista de conexiones activas
+        # Verificar límite de conexiones antes de agregar
         with _websocket_lock:
+            if len(_websocket_connections) >= MAX_WEBSOCKET_CONNECTIONS:
+                await websocket.close(code=1013, reason="Too many connections")
+                print(f"[websocket] Conexión rechazada: límite de {MAX_WEBSOCKET_CONNECTIONS} alcanzado")
+                return
+            
             _websocket_connections.append(websocket)
+            print(f"[websocket] Conexiones activas: {len(_websocket_connections)}/{MAX_WEBSOCKET_CONNECTIONS}")
         
         # Enviar mensaje de bienvenida
         await websocket.send_text(json.dumps({
@@ -684,9 +694,23 @@ async def websocket_endpoint(websocket: WebSocket):
         
         # Mantener la conexión activa y escuchar mensajes
         try:
-            while True:
-                # Esperar mensajes del cliente
-                data = await websocket.receive_text()
+            # LÍMITE DE SEGURIDAD: máximo 10,000 mensajes por conexión
+            max_messages_per_connection = 10000
+            message_count = 0
+            
+            while message_count < max_messages_per_connection:
+                try:
+                    # Esperar mensajes del cliente con timeout
+                    data = await asyncio.wait_for(websocket.receive_text(), timeout=300)  # 5 minutos timeout
+                    message_count += 1
+                except asyncio.TimeoutError:
+                    # Enviar ping para mantener conexión viva
+                    await websocket.send_text(json.dumps({
+                        "type": "ping",
+                        "timestamp": time.time(),
+                        "message": "Keep-alive ping"
+                    }))
+                    continue
                 try:
                     message = json.loads(data)
                     print(f"[websocket] Mensaje recibido: {message}")
@@ -979,6 +1003,15 @@ async def websocket_endpoint(websocket: WebSocket):
                         "message": "JSON inválido",
                         "timestamp": time.time()
                     }))
+                    
+            # Si llegamos aquí, se alcanzó el límite de mensajes
+            if message_count >= max_messages_per_connection:
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "message": f"Límite de mensajes alcanzado ({max_messages_per_connection}). Reconectando...",
+                    "timestamp": time.time()
+                }))
+                await websocket.close(code=1008, reason="Message limit exceeded")
                     
         except WebSocketDisconnect:
             print(f"[websocket] Cliente desconectado: {websocket.client.host}:{websocket.client.port}")

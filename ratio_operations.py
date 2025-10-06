@@ -384,8 +384,33 @@ class RatioOperationManager:
             condition=request.condition,
             pair=request.pair
         )
-        with self.operation_lock:
+        # Usar timeout para evitar deadlocks
+        if not self.operation_lock.acquire(timeout=30):
+            print(f"⚠️ Timeout adquiriendo lock para operación {operation_id}")
+            return OperationProgress(
+                operation_id=operation_id,
+                status=OperationStatus.FAILED,
+                current_step=OperationStep.FINALIZING,
+                progress_percentage=100,
+                start_time=datetime.now().isoformat(),
+                last_update=datetime.now().isoformat(),
+                sell_orders=[],
+                buy_orders=[],
+                total_sold_amount=0.0,
+                total_bought_amount=0.0,
+                average_sell_price=0.0,
+                average_buy_price=0.0,
+                current_ratio=0.0,
+                target_ratio=request.target_ratio,
+                condition_met=False,
+                messages=["❌ Error: Timeout adquiriendo lock del sistema"],
+                error="Timeout adquiriendo lock del sistema"
+            )
+        
+        try:
             self.active_operations[operation_id] = progress
+        finally:
+            self.operation_lock.release()
         
         try:
             progress.status = OperationStatus.RUNNING
@@ -436,8 +461,22 @@ class RatioOperationManager:
             self._add_message(operation_id, f"📈 Instrumentos: Vender {request.instrument_to_sell} → Comprar {instrument_to_buy}")
             
             # Bucle principal de lotes - continúa indefinidamente hasta completar o cancelar
-            while progress.remaining_nominales > 0 and progress.status == OperationStatus.RUNNING:
+            # LÍMITE DE SEGURIDAD: máximo 1000 intentos para evitar cuelgues infinitos
+            max_safety_attempts = 1000
+            safety_attempt = 0
+            
+            while (progress.remaining_nominales > 0 and 
+                   progress.status == OperationStatus.RUNNING and 
+                   safety_attempt < max_safety_attempts):
                 progress.current_attempt += 1
+                safety_attempt += 1
+                
+                # Verificar límite de seguridad
+                if safety_attempt >= max_safety_attempts:
+                    self._add_message(operation_id, f"⚠️ Límite de seguridad alcanzado ({max_safety_attempts} intentos)")
+                    progress.status = OperationStatus.FAILED
+                    progress.error = "Límite de seguridad alcanzado para evitar cuelgue infinito"
+                    break
                 
                 self._update_progress(operation_id, current_step=OperationStep.CALCULATING_BATCH_SIZE)
                 await self._notify_progress(operation_id, progress)
@@ -539,15 +578,34 @@ class RatioOperationManager:
         return await self.execute_ratio_operation_batch(request)
 
     def get_operation_status(self, operation_id: str) -> Optional[OperationProgress]:
-        with self.operation_lock:
+        # Usar timeout para evitar deadlocks
+        if not self.operation_lock.acquire(timeout=5):
+            print(f"⚠️ Timeout obteniendo estado de operación {operation_id}")
+            return None
+        
+        try:
             return self.active_operations.get(operation_id)
+        finally:
+            self.operation_lock.release()
 
     def get_all_operations(self) -> List[OperationProgress]:
-        with self.operation_lock:
+        # Usar timeout para evitar deadlocks
+        if not self.operation_lock.acquire(timeout=5):
+            print(f"⚠️ Timeout obteniendo todas las operaciones")
+            return []
+        
+        try:
             return list(self.active_operations.values())
+        finally:
+            self.operation_lock.release()
 
     def cancel_operation(self, operation_id: str) -> bool:
-        with self.operation_lock:
+        # Usar timeout para evitar deadlocks
+        if not self.operation_lock.acquire(timeout=5):
+            print(f"⚠️ Timeout cancelando operación {operation_id}")
+            return False
+        
+        try:
             if operation_id in self.active_operations:
                 progress = self.active_operations[operation_id]
                 if progress.status in [OperationStatus.PENDING, OperationStatus.RUNNING]:
@@ -555,7 +613,9 @@ class RatioOperationManager:
                     progress.error = "Operación cancelada por el usuario"
                     self._add_message(operation_id, "🛑 Operación cancelada")
                     return True
-        return False
+            return False
+        finally:
+            self.operation_lock.release()
 
 
 ratio_manager = RatioOperationManager()
