@@ -51,11 +51,27 @@
 ```json
 {
   "type": "ratio_operation_started",
-  "operation_id": "RATIO_a1b2c3d4",
+  "operation_id": "TX26-TX28_3d2a9f7f",
   "message": "Operación de ratio iniciada: TX26-TX28",
   "timestamp": 1759761110.465616
 }
 ```
+
+**📋 Formato del Operation ID**: `PAR1-PAR2_aleatorio`
+- **PAR1**: Símbolo del instrumento a vender (ej: TX26)
+- **PAR2**: Símbolo del instrumento a comprar (ej: TX28)  
+- **aleatorio**: 8 caracteres hexadecimales únicos (ej: 3d2a9f7f)
+
+**Ejemplos de Operation IDs**:
+- `TX26-TX28_3d2a9f7f` - Operación TX26/TX28
+- `AL30-GD30_8f4e2a1b` - Operación AL30/GD30
+- `GD29-AE38_1a2b3c4d` - Operación GD29/AE38
+
+**🔍 Ventajas del Nuevo Formato**:
+- ✅ **Identificación inmediata**: Puedes ver qué par de instrumentos es solo mirando el ID
+- ✅ **Único**: La parte aleatoria garantiza que no habrá conflictos
+- ✅ **Legible**: Fácil de entender para humanos y sistemas
+- ✅ **Compacto**: Más corto que el formato anterior
 
 ---
 
@@ -65,7 +81,7 @@
 ```json
 {
   "type": "ratio_operation_progress",
-  "operation_id": "RATIO_a1b2c3d4",
+  "operation_id": "TX26-TX28_3d2a9f7f",
   "status": "running",
   "current_step": "analyzing_market",
   "progress_percentage": 20,
@@ -125,7 +141,7 @@
 ```json
 {
   "type": "ratio_operation_progress",
-  "operation_id": "RATIO_a1b2c3d4",
+  "operation_id": "TX26-TX28_3d2a9f7f",
   "status": "running",
   "current_step": "sell_executed",
   "progress_percentage": 35,
@@ -166,7 +182,7 @@
 ```json
 {
   "type": "ratio_operation_progress",
-  "operation_id": "RATIO_a1b2c3d4",
+  "operation_id": "TX26-TX28_3d2a9f7f",
   "status": "completed",
   "current_step": "finalizing",
   "progress_percentage": 100,
@@ -244,7 +260,7 @@
 ```json
 {
   "type": "ratio_operation_progress",
-  "operation_id": "RATIO_a1b2c3d4",
+  "operation_id": "TX26-TX28_3d2a9f7f",
   "status": "failed",
   "current_step": "finalizing",
   "progress_percentage": 45,
@@ -272,7 +288,7 @@
 ```json
 {
   "type": "ratio_operation_progress",
-  "operation_id": "RATIO_a1b2c3d4",
+  "operation_id": "TX26-TX28_3d2a9f7f",
   "status": "failed",
   "current_step": "finalizing",
   "progress_percentage": 100,
@@ -310,7 +326,7 @@
 ```json
 {
   "type": "ratio_operation_status",
-  "operation_id": "RATIO_a1b2c3d4",
+  "operation_id": "TX26-TX28_3d2a9f7f",
   "status": "running",
   "current_step": "waiting_buy_execution",
   "progress_percentage": 75,
@@ -350,7 +366,7 @@
 ```json
 {
   "type": "ratio_operation_cancelled",
-  "operation_id": "RATIO_a1b2c3d4",
+  "operation_id": "TX26-TX28_3d2a9f7f",
   "message": "Operación cancelada exitosamente",
   "timestamp": 1759761127.123456
 }
@@ -373,7 +389,7 @@
   "type": "ratio_operations_list",
   "operations": [
     {
-      "operation_id": "RATIO_a1b2c3d4",
+      "operation_id": "TX26-TX28_3d2a9f7f",
       "status": "completed",
       "current_step": "finalizing",
       "progress_percentage": 100,

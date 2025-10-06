@@ -20,6 +20,78 @@ except ImportError:
 	pass
 
 from supabase_client import get_active_pairs
+import uuid
+
+
+def _generate_ratio_operation_id(pair, instrument_to_sell):
+    """
+    Genera un operation_id con formato: PAR1-PAR2_aleatorio
+    Ejemplo: TX26-TX28_a1b2c3d4
+    """
+    try:
+        # Determinar los instrumentos del par
+        if isinstance(pair, list):
+            # Nuevo formato: array de instrumentos
+            instruments = [inst.strip() for inst in pair]
+            instrument_to_buy = None
+            for inst in instruments:
+                if inst != instrument_to_sell:
+                    instrument_to_buy = inst
+                    break
+        else:
+            # Formato legacy: string
+            pair_parts = pair.split('-')
+            if len(pair_parts) < 2:
+                # Fallback si no se puede parsear
+                return f"RATIO_{uuid.uuid4().hex[:8]}"
+            
+            sell_inst = instrument_to_sell.strip()
+            remaining = pair.replace(sell_inst, '', 1).strip().strip('-').strip()
+            instrument_to_buy = remaining
+        
+        if not instrument_to_buy:
+            # Fallback si no se puede determinar el instrumento a comprar
+            return f"RATIO_{uuid.uuid4().hex[:8]}"
+        
+        # Extraer símbolos cortos (ej: TX26, TX28)
+        sell_symbol = _extract_symbol_short(instrument_to_sell)
+        buy_symbol = _extract_symbol_short(instrument_to_buy)
+        
+        # Generar número aleatorio de 8 caracteres
+        random_part = uuid.uuid4().hex[:8]
+        
+        # Formato: SELL-BUY_aleatorio
+        return f"{sell_symbol}-{buy_symbol}_{random_part}"
+        
+    except Exception as e:
+        print(f"[main] Error generando operation_id: {e}")
+        # Fallback en caso de error
+        return f"RATIO_{uuid.uuid4().hex[:8]}"
+
+
+def _extract_symbol_short(instrument_name):
+    """
+    Extrae el símbolo corto del nombre del instrumento.
+    Ejemplo: "MERV - XMEV - TX26 - 24hs" -> "TX26"
+    """
+    try:
+        # Buscar patrones como TX26, TX28, etc.
+        import re
+        match = re.search(r'([A-Z]{2}\d{2})', instrument_name)
+        if match:
+            return match.group(1)
+        
+        # Fallback: usar las primeras letras/números
+        parts = instrument_name.split()
+        for part in parts:
+            if len(part) >= 3 and any(c.isalpha() for c in part) and any(c.isdigit() for c in part):
+                return part
+        
+        # Último fallback: usar las primeras 4 letras
+        return instrument_name.replace(' ', '')[:4].upper()
+        
+    except Exception:
+        return "UNKNOWN"
 
 # Lifespan handler para reemplazar @app.on_event
 @asynccontextmanager
@@ -846,7 +918,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                     "timestamp": time.time()
                                 }))
                                 continue
-                            operation_id = f"RATIO_{uuid.uuid4().hex[:8]}"
+                            # Generar operation_id con formato: PAR1-PAR2_aleatorio
+                            operation_id = _generate_ratio_operation_id(message["pair"], message["instrument_to_sell"])
                             request = RatioOperationRequest(
                                 pair=message["pair"],
                                 instrument_to_sell=message["instrument_to_sell"],
