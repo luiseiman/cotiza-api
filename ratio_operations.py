@@ -239,6 +239,14 @@ class RatioOperationManager:
             # Calcular ratio actual con cotizaciones reales
             current_ratio = sell_data.get('bid', 0) / buy_data.get('offer', 1) if buy_data.get('offer', 0) > 0 else 0
             
+            # Actualizar el objeto OperationProgress con los valores reales
+            if operation_id in self.active_operations:
+                progress = self.active_operations[operation_id]
+                progress.current_ratio = current_ratio
+                if target_ratio is not None and condition:
+                    progress.condition_met = self._check_condition(current_ratio, target_ratio, condition)
+                    print(f"[DEBUG] Actualizando progress: current_ratio={current_ratio}, condition_met={progress.condition_met}")
+            
             self._add_message(operation_id, f"📊 Cotizaciones actuales:")
             self._add_message(operation_id, f"   {instrument_to_sell}: bid={sell_data.get('bid', 'N/A')}, offer={sell_data.get('offer', 'N/A')}")
             self._add_message(operation_id, f"   {instrument_to_buy}: bid={buy_data.get('bid', 'N/A')}, offer={buy_data.get('offer', 'N/A')}")
@@ -615,6 +623,9 @@ class RatioOperationManager:
                 
                 # Mostrar cotizaciones actuales en tiempo real con análisis de ratio
                 self._show_current_quotes(operation_id, request.instrument_to_sell, instrument_to_buy, request.target_ratio, request.condition)
+                
+                # Notificar el progreso actualizado después de calcular los ratios
+                await self._notify_progress(operation_id, progress)
                 
                 # Calcular tamaño del lote
                 max_batch_size = self._calculate_max_batch_size(progress, quotes_cache)
