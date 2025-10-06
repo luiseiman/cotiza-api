@@ -147,6 +147,14 @@ class RatioOperationManager:
                 if len(progress.messages) > 50:
                     progress.messages = progress.messages[-50:]
 
+    def _add_message_unlocked(self, operation_id: str, message: str):
+        """Versión de _add_message que NO adquiere el lock (para usar cuando ya se tiene el lock)"""
+        if operation_id in self.active_operations:
+            progress = self.active_operations[operation_id]
+            progress.messages.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
+            if len(progress.messages) > 50:
+                progress.messages = progress.messages[-50:]
+
     def _calculate_current_ratio(self, progress: OperationProgress) -> float:
         if not progress.sell_orders or not progress.buy_orders:
             return 0.0
@@ -449,14 +457,33 @@ class RatioOperationManager:
             
             instruments_needed = [request.instrument_to_sell, instrument_to_buy]
             
-            # Verificar cotizaciones disponibles
-            missing_instruments = [inst for inst in instruments_needed if inst not in quotes_cache]
-            if missing_instruments:
-                self._add_message(operation_id, f"⚠️ Faltan cotizaciones para: {', '.join(missing_instruments)}")
-                # Para la demo, usar cotizaciones simuladas
-                quotes_cache[request.instrument_to_sell] = {"bid": 1484.5, "offer": 1485.0}
-                quotes_cache[instrument_to_buy] = {"bid": 1521.0, "offer": 1521.5}
-                self._add_message(operation_id, "📊 Usando cotizaciones simuladas para la demo")
+            # Verificar cotizaciones disponibles usando la función real
+            from ratios_worker import obtener_datos_mercado
+            
+            sell_data = obtener_datos_mercado(request.instrument_to_sell)
+            buy_data = obtener_datos_mercado(instrument_to_buy)
+            
+            if not sell_data or not buy_data:
+                missing_instruments = []
+                if not sell_data:
+                    missing_instruments.append(request.instrument_to_sell)
+                if not buy_data:
+                    missing_instruments.append(instrument_to_buy)
+                
+                self._add_message(operation_id, f"❌ No hay cotizaciones reales disponibles para: {', '.join(missing_instruments)}")
+                self._add_message(operation_id, "💡 Asegúrate de que los instrumentos estén suscritos en el sistema")
+                
+                # Para la demo, usar cotizaciones simuladas solo si no hay datos reales
+                if not sell_data:
+                    quotes_cache[request.instrument_to_sell] = {"bid": 1484.5, "offer": 1485.0, "last": 1484.75}
+                    self._add_message(operation_id, f"📊 Usando cotización simulada para {request.instrument_to_sell}")
+                if not buy_data:
+                    quotes_cache[instrument_to_buy] = {"bid": 1521.0, "offer": 1521.5, "last": 1521.25}
+                    self._add_message(operation_id, f"📊 Usando cotización simulada para {instrument_to_buy}")
+            else:
+                self._add_message(operation_id, f"✅ Cotizaciones reales disponibles:")
+                self._add_message(operation_id, f"   {request.instrument_to_sell}: bid={sell_data.get('bid')}, offer={sell_data.get('offer')}")
+                self._add_message(operation_id, f"   {instrument_to_buy}: bid={buy_data.get('bid')}, offer={buy_data.get('offer')}")
             
             self._add_message(operation_id, f"📈 Instrumentos: Vender {request.instrument_to_sell} → Comprar {instrument_to_buy}")
             
@@ -611,7 +638,8 @@ class RatioOperationManager:
                 if progress.status in [OperationStatus.PENDING, OperationStatus.RUNNING]:
                     progress.status = OperationStatus.CANCELLED
                     progress.error = "Operación cancelada por el usuario"
-                    self._add_message(operation_id, "🛑 Operación cancelada")
+                    # Usar versión sin lock para evitar deadlock
+                    self._add_message_unlocked(operation_id, "🛑 Operación cancelada")
                     return True
             return False
         finally:
