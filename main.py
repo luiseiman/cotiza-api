@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Body, WebSocket, WebSocketDisconnect, HTTPException, status, Request
 from fastapi.responses import JSONResponse, HTMLResponse, RedirectResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 import ws_rofex
 from ratios_worker import start as start_worker, stop as stop_worker, set_session as set_worker_session
 import telegram_control as tg
@@ -20,7 +21,81 @@ except ImportError:
 
 from supabase_client import get_active_pairs
 
-app = FastAPI(title="Cotiza API", version="1.0.0")
+# Lifespan handler para reemplazar @app.on_event
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    print("[main] startup")
+    # Capturar event loop para envíos desde otros hilos
+    try:
+        global _event_loop
+        _event_loop = asyncio.get_event_loop()
+        print(f"[startup] Event loop capturado: {_event_loop}")
+    except Exception as e:
+        print(f"[startup] No se pudo capturar event loop: {e}")
+        _event_loop = None
+    
+    # Habilitar el bot de Telegram solo si TELEGRAM_POLLING=1 (por defecto 1 local, 0 en Render)
+    if os.getenv("TELEGRAM_POLLING", "1") == "1":
+        try:
+            import importlib
+            import telegram_control as tg_local
+            tg_local = importlib.reload(tg_local)
+            print(f"[main] telegram_control file: {getattr(tg_local, '__file__', None)}")
+            tg_local.ensure_started(
+                start_callback=lambda p: iniciar(p),
+                stop_callback=lambda: detener(),
+                restart_callback=lambda: reiniciar(),
+                status_callback=lambda: _get_service_status()
+            )
+        except Exception as e:
+            print(f"[main] error ensure_started: {e}")
+    else:
+        print("[main] Telegram polling deshabilitado por TELEGRAM_POLLING!=1")
+    
+    # Iniciar worker de refresh de dashboard (si está disponible)
+    try:
+        start_refresh_worker()
+    except Exception as e:
+        print(f"[main] No se pudo iniciar dashboard_refresh worker: {e}")
+    
+    # Limpiar workers del dashboard al iniciar
+    try:
+        _stop_dashboard_broadcast_worker()
+    except Exception as e:
+        print(f"[startup] Error limpiando dashboard worker: {e}")
+    
+    # No iniciar worker de ratios automáticamente, solo cuando se solicite
+    print("[main] Servicio listo. Use /start para iniciar.")
+    # Iniciar "dashboard" por defecto para latidos
+    try:
+        _dashboard_start()
+    except Exception as e:
+        print(f"[main] Error iniciando dashboard: {e}")
+    
+    yield
+    
+    # Shutdown
+    print("[main] shutdown iniciado")
+    
+    # Detener worker del dashboard
+    try:
+        _stop_dashboard_broadcast_worker()
+    except Exception as e:
+        print(f"[shutdown] Error deteniendo dashboard worker: {e}")
+    
+    # Limpiar conexiones WebSocket
+    try:
+        with _websocket_lock:
+            _websocket_connections.clear()
+        with _dashboard_lock:
+            _dashboard_subscribers.clear()
+    except Exception as e:
+        print(f"[shutdown] Error limpiando conexiones: {e}")
+    
+    print("[main] shutdown completado")
+
+app = FastAPI(title="Cotiza API", version="1.0.0", lifespan=lifespan)
 
 # Configurar CORS para permitir conexiones WebSocket
 app.add_middleware(
@@ -227,56 +302,7 @@ class SendOrderRequest(BaseModel):
     market: str | None = None
     client_order_id: str | None = None  # ID único del cliente para tracking
 
-@app.on_event("startup")
-def _startup():
-    print("[main] startup")
-    # Capturar event loop para envíos desde otros hilos
-    try:
-        global _event_loop
-        _event_loop = asyncio.get_event_loop()
-    except Exception:
-        _event_loop = None
-    # Habilitar el bot de Telegram solo si TELEGRAM_POLLING=1 (por defecto 1 local, 0 en Render)
-    if os.getenv("TELEGRAM_POLLING", "1") == "1":
-        try:
-            import importlib
-            import telegram_control as tg_local
-            tg_local = importlib.reload(tg_local)
-            print(f"[main] telegram_control file: {getattr(tg_local, '__file__', None)}")
-            tg_local.ensure_started(
-                start_callback=lambda p: iniciar(p),
-                stop_callback=lambda: detener(),
-                restart_callback=lambda: reiniciar(),
-                status_callback=lambda: estado(),
-            )
-        except Exception as e:
-            print(f"[main] error ensure_started: {e}")
-    else:
-        print("[main] Telegram polling deshabilitado por TELEGRAM_POLLING!=1")
-    # Iniciar worker de refresh de dashboard (si está disponible)
-    try:
-        start_refresh_worker()
-    except Exception as e:
-        print(f"[main] No se pudo iniciar dashboard_refresh worker: {e}")
-    
-    # WebSocket básico no requiere tareas en background
-    # No iniciar worker de ratios automáticamente, solo cuando se solicite
-    print("[main] Servicio listo. Use /start para iniciar.")
-    # Iniciar "dashboard" por defecto para latidos
-    try:
-        _dashboard_start()
-    except Exception:
-        pass
-
-@app.on_event("shutdown")
-def _shutdown():
-    print("[main] shutdown")
-    stop_worker()
-    ws_rofex.manager.stop()
-    try:
-        _dashboard_stop()
-    except Exception:
-        pass
+# Startup y shutdown manejados por lifespan handler
 
 @app.post("/cotizaciones/iniciar")
 def iniciar(req: IniciarRequest):
@@ -451,6 +477,30 @@ def health():
     return {"status": "healthy", "timestamp": time.time()}
 
 
+# Shutdown manejado por lifespan handler
+
+
+@app.get("/health/detailed")
+def detailed_health():
+    """Endpoint de salud detallado con información del sistema."""
+    try:
+        with _websocket_lock:
+            ws_count = len(_websocket_connections)
+        with _dashboard_lock:
+            dashboard_subs = len(_dashboard_subscribers)
+        
+        return {
+            "status": "healthy",
+            "timestamp": time.time(),
+            "websocket_connections": ws_count,
+            "dashboard_subscribers": dashboard_subs,
+            "dashboard_worker_running": _dashboard_worker_thread and _dashboard_worker_thread.is_alive(),
+            "event_loop_available": _event_loop is not None and not _event_loop.is_closed()
+        }
+    except Exception as e:
+        return {"status": "error", "error": str(e), "timestamp": time.time()}
+
+
 # WebSocket connections
 _websocket_connections = []
 _websocket_lock = threading.Lock()
@@ -461,6 +511,8 @@ _dashboard_subscribers = []
 _dashboard_lock = threading.Lock()
 _last_dashboard_data = None
 _last_dashboard_update = None
+_dashboard_worker_thread = None
+_dashboard_worker_stop = threading.Event()
 
 
 async def _broadcast_dashboard_data():
@@ -523,27 +575,58 @@ async def _broadcast_dashboard_data():
 
 def _start_dashboard_broadcast_worker():
     """Inicia el worker que envía datos del dashboard cada 10 segundos."""
+    global _dashboard_worker_thread
+    
+    # Evitar múltiples workers
+    if _dashboard_worker_thread and _dashboard_worker_thread.is_alive():
+        print("[dashboard] Worker ya está corriendo")
+        return
+    
     def worker():
-        while True:
+        print("[dashboard] Worker iniciado")
+        while not _dashboard_worker_stop.is_set():
             try:
                 if _dashboard_subscribers:  # Solo si hay suscriptores
                     # Usar el event loop global si está disponible
-                    if _event_loop:
+                    if _event_loop and not _event_loop.is_closed():
                         asyncio.run_coroutine_threadsafe(_broadcast_dashboard_data(), _event_loop)
                     else:
-                        # Crear un nuevo loop si no hay uno global
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        loop.run_until_complete(_broadcast_dashboard_data())
-                        loop.close()
+                        # Crear un nuevo loop solo si es necesario
+                        try:
+                            loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(loop)
+                            loop.run_until_complete(_broadcast_dashboard_data())
+                            loop.close()
+                        except Exception as e:
+                            print(f"[dashboard] Error creando loop: {e}")
             except Exception as e:
                 print(f"[dashboard] Error en worker: {e}")
             
-            time.sleep(10)  # Actualizar cada 10 segundos
+            # Usar wait con timeout para poder salir limpiamente
+            if _dashboard_worker_stop.wait(10):  # Esperar 10 segundos o hasta que se detenga
+                break
     
-    thread = threading.Thread(target=worker, daemon=True)
-    thread.start()
+    _dashboard_worker_stop.clear()
+    _dashboard_worker_thread = threading.Thread(target=worker, daemon=True)
+    _dashboard_worker_thread.start()
     print("[dashboard] Worker de broadcast iniciado (cada 10 segundos)")
+
+
+def _stop_dashboard_broadcast_worker():
+    """Detiene el worker del dashboard."""
+    global _dashboard_worker_thread
+    
+    if _dashboard_worker_thread and _dashboard_worker_thread.is_alive():
+        print("[dashboard] Deteniendo worker...")
+        _dashboard_worker_stop.set()
+        _dashboard_worker_thread.join(timeout=15)  # Esperar máximo 15 segundos
+        
+        if _dashboard_worker_thread.is_alive():
+            print("[dashboard] Worker no terminó en 15s, forzando...")
+        else:
+            print("[dashboard] Worker detenido correctamente")
+        
+        _dashboard_worker_thread = None
 
 
 def _subscribe_to_dashboard(websocket):
@@ -574,6 +657,10 @@ def _unsubscribe_from_dashboard(websocket):
         if websocket in _dashboard_subscribers:
             _dashboard_subscribers.remove(websocket)
             print(f"[dashboard] Suscriptor removido. Total: {len(_dashboard_subscribers)}")
+            
+            # Si no hay más suscriptores, detener el worker
+            if len(_dashboard_subscribers) == 0:
+                _stop_dashboard_broadcast_worker()
 
 @app.websocket("/ws/cotizaciones")
 async def websocket_endpoint(websocket: WebSocket):
@@ -721,6 +808,163 @@ async def websocket_endpoint(websocket: WebSocket):
                         except Exception as e:
                             await websocket.send_text(json.dumps({
                                 "type": "error", "message": f"send_order failed: {str(e)}"
+                            }))
+                    elif _cmd in ("start_ratio_operation", "ratio_operation"):
+                        try:
+                            from ratio_operations import ratio_manager, RatioOperationRequest
+                            import uuid
+                            required_params = ["pair", "instrument_to_sell", "nominales", "target_ratio", "condition", "client_id"]
+                            missing_params = [p for p in required_params if p not in message]
+                            if missing_params:
+                                await websocket.send_text(json.dumps({
+                                    "type": "ratio_operation_error",
+                                    "error": f"Parámetros faltantes: {', '.join(missing_params)}",
+                                    "timestamp": time.time()
+                                }))
+                                continue
+                            operation_id = f"RATIO_{uuid.uuid4().hex[:8]}"
+                            request = RatioOperationRequest(
+                                pair=message["pair"],
+                                instrument_to_sell=message["instrument_to_sell"],
+                                nominales=float(message["nominales"]),
+                                target_ratio=float(message["target_ratio"]),
+                                condition=message["condition"],
+                                client_id=message["client_id"],
+                                operation_id=operation_id
+                            )
+                            async def progress_callback(progress):
+                                await websocket.send_text(json.dumps({
+                                    "type": "ratio_operation_progress",
+                                    "operation_id": progress.operation_id,
+                                    "status": progress.status.value,
+                                    "current_step": progress.current_step.value,
+                                    "progress_percentage": progress.progress_percentage,
+                                    "current_ratio": progress.current_ratio,
+                                    "target_ratio": progress.target_ratio,
+                                    "condition_met": progress.condition_met,
+                                    "average_sell_price": progress.average_sell_price,
+                                    "average_buy_price": progress.average_buy_price,
+                                    "total_sold_amount": progress.total_sold_amount,
+                                    "total_bought_amount": progress.total_bought_amount,
+                                    "sell_orders_count": len(progress.sell_orders),
+                                    "buy_orders_count": len(progress.buy_orders),
+                                    "messages": progress.messages[-10:],
+                                    "error": progress.error,
+                                    "timestamp": time.time()
+                                }))
+                            ratio_manager.register_callback(operation_id, progress_callback)
+                            asyncio.create_task(ratio_manager.execute_ratio_operation(request))
+                            await websocket.send_text(json.dumps({
+                                "type": "ratio_operation_started",
+                                "operation_id": operation_id,
+                                "message": f"Operación de ratio iniciada: {request.pair}",
+                                "timestamp": time.time()
+                            }))
+                        except Exception as e:
+                            await websocket.send_text(json.dumps({
+                                "type": "ratio_operation_error",
+                                "error": str(e),
+                                "timestamp": time.time()
+                            }))
+                    elif _cmd in ("get_ratio_operation_status", "ratio_status"):
+                        try:
+                            from ratio_operations import ratio_manager
+                            operation_id = message.get("operation_id")
+                            if not operation_id:
+                                await websocket.send_text(json.dumps({
+                                    "type": "ratio_operation_error",
+                                    "error": "operation_id requerido",
+                                    "timestamp": time.time()
+                                }))
+                                continue
+                            progress = ratio_manager.get_operation_status(operation_id)
+                            if progress:
+                                await websocket.send_text(json.dumps({
+                                    "type": "ratio_operation_status",
+                                    "operation_id": progress.operation_id,
+                                    "status": progress.status.value,
+                                    "current_step": progress.current_step.value,
+                                    "progress_percentage": progress.progress_percentage,
+                                    "current_ratio": progress.current_ratio,
+                                    "target_ratio": progress.target_ratio,
+                                    "condition_met": progress.condition_met,
+                                    "average_sell_price": progress.average_sell_price,
+                                    "average_buy_price": progress.average_buy_price,
+                                    "total_sold_amount": progress.total_sold_amount,
+                                    "total_bought_amount": progress.total_bought_amount,
+                                    "sell_orders_count": len(progress.sell_orders),
+                                    "buy_orders_count": len(progress.buy_orders),
+                                    "messages": progress.messages[-20:],
+                                    "error": progress.error,
+                                    "start_time": progress.start_time,
+                                    "last_update": progress.last_update,
+                                    "timestamp": time.time()
+                                }))
+                            else:
+                                await websocket.send_text(json.dumps({
+                                    "type": "ratio_operation_error",
+                                    "error": f"Operación {operation_id} no encontrada",
+                                    "timestamp": time.time()
+                                }))
+                        except Exception as e:
+                            await websocket.send_text(json.dumps({
+                                "type": "ratio_operation_error",
+                                "error": str(e),
+                                "timestamp": time.time()
+                            }))
+                    elif _cmd in ("cancel_ratio_operation", "ratio_cancel"):
+                        try:
+                            from ratio_operations import ratio_manager
+                            operation_id = message.get("operation_id")
+                            if not operation_id:
+                                await websocket.send_text(json.dumps({
+                                    "type": "ratio_operation_error",
+                                    "error": "operation_id requerido",
+                                    "timestamp": time.time()
+                                }))
+                                continue
+                            cancelled = ratio_manager.cancel_operation(operation_id)
+                            await websocket.send_text(json.dumps({
+                                "type": "ratio_operation_cancelled" if cancelled else "ratio_operation_error",
+                                "operation_id": operation_id,
+                                "message": "Operación cancelada exitosamente" if cancelled else f"No se pudo cancelar la operación {operation_id}",
+                                "timestamp": time.time()
+                            }))
+                        except Exception as e:
+                            await websocket.send_text(json.dumps({
+                                "type": "ratio_operation_error",
+                                "error": str(e),
+                                "timestamp": time.time()
+                            }))
+                    elif _cmd in ("list_ratio_operations", "ratio_list"):
+                        try:
+                            from ratio_operations import ratio_manager
+                            operations = ratio_manager.get_all_operations()
+                            operations_data = []
+                            for op in operations:
+                                operations_data.append({
+                                    "operation_id": op.operation_id,
+                                    "status": op.status.value,
+                                    "current_step": op.current_step.value,
+                                    "progress_percentage": op.progress_percentage,
+                                    "current_ratio": op.current_ratio,
+                                    "target_ratio": op.target_ratio,
+                                    "condition_met": op.condition_met,
+                                    "start_time": op.start_time,
+                                    "last_update": op.last_update,
+                                    "error": op.error
+                                })
+                            await websocket.send_text(json.dumps({
+                                "type": "ratio_operations_list",
+                                "operations": operations_data,
+                                "count": len(operations_data),
+                                "timestamp": time.time()
+                            }))
+                        except Exception as e:
+                            await websocket.send_text(json.dumps({
+                                "type": "ratio_operation_error",
+                                "error": str(e),
+                                "timestamp": time.time()
                             }))
                     else:
                         await websocket.send_text(json.dumps({
