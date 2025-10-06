@@ -228,6 +228,52 @@ class RatioOperationManager:
             return current_ratio >= target_ratio
         return False
     
+    def _show_current_quotes(self, operation_id: str, instrument_to_sell: str, instrument_to_buy: str, target_ratio: float = None, condition: str = ""):
+        """Muestra las cotizaciones actuales en tiempo real con análisis de ratio"""
+        from ratios_worker import obtener_datos_mercado
+        
+        sell_data = obtener_datos_mercado(instrument_to_sell)
+        buy_data = obtener_datos_mercado(instrument_to_buy)
+        
+        if sell_data and buy_data:
+            # Calcular ratio actual con cotizaciones reales
+            current_ratio = sell_data.get('bid', 0) / buy_data.get('offer', 1) if buy_data.get('offer', 0) > 0 else 0
+            
+            self._add_message(operation_id, f"📊 Cotizaciones actuales:")
+            self._add_message(operation_id, f"   {instrument_to_sell}: bid={sell_data.get('bid', 'N/A')}, offer={sell_data.get('offer', 'N/A')}")
+            self._add_message(operation_id, f"   {instrument_to_buy}: bid={buy_data.get('bid', 'N/A')}, offer={buy_data.get('offer', 'N/A')}")
+            
+            # Mostrar análisis detallado del ratio si se proporciona target_ratio
+            if target_ratio is not None and condition:
+                current_ratio_pct = current_ratio * 100
+                target_ratio_pct = target_ratio * 100
+                difference_pct = current_ratio_pct - target_ratio_pct
+                
+                self._add_message(operation_id, f"📈 Análisis de Ratio:")
+                self._add_message(operation_id, f"   Ratio actual: {current_ratio:.6f} ({current_ratio_pct:.2f}%)")
+                self._add_message(operation_id, f"   Ratio objetivo: {condition} {target_ratio:.6f} ({target_ratio_pct:.2f}%)")
+                
+                if difference_pct > 0:
+                    self._add_message(operation_id, f"   Diferencia: +{difference_pct:.2f}% por encima del objetivo")
+                else:
+                    self._add_message(operation_id, f"   Diferencia: {difference_pct:.2f}% por debajo del objetivo")
+                
+                # Indicar si cumple la condición
+                condition_met = self._check_condition(current_ratio, target_ratio, condition)
+                status_icon = "✅" if condition_met else "❌"
+                self._add_message(operation_id, f"   Condición: {status_icon} {'CUMPLE' if condition_met else 'NO CUMPLE'}")
+            else:
+                self._add_message(operation_id, f"   Ratio actual: {current_ratio:.6f}")
+        else:
+            missing_instruments = []
+            if not sell_data:
+                missing_instruments.append(instrument_to_sell)
+            if not buy_data:
+                missing_instruments.append(instrument_to_buy)
+            
+            self._add_message(operation_id, f"⚠️ Sin cotizaciones reales para: {', '.join(missing_instruments)}")
+            self._add_message(operation_id, "💡 Verificar que los instrumentos estén suscritos en el sistema")
+    
     def _calculate_weighted_average_ratio(self, progress: OperationProgress) -> float:
         """Calcula el ratio promedio ponderado por cantidad de todas las operaciones ejecutadas."""
         if not progress.sell_orders or not progress.buy_orders:
@@ -567,11 +613,15 @@ class RatioOperationManager:
                 self._add_message(operation_id, f"🔄 Intento {progress.current_attempt} (intentos infinitos hasta completar o cancelar)")
                 self._add_message(operation_id, f"   Nominales restantes: {progress.remaining_nominales}")
                 
+                # Mostrar cotizaciones actuales en tiempo real con análisis de ratio
+                self._show_current_quotes(operation_id, request.instrument_to_sell, instrument_to_buy, request.target_ratio, request.condition)
+                
                 # Calcular tamaño del lote
                 max_batch_size = self._calculate_max_batch_size(progress, quotes_cache)
                 
                 if max_batch_size <= 0:
                     self._add_message(operation_id, "⏳ Esperando mejores condiciones de mercado... (continuará indefinidamente)")
+                    self._add_message(operation_id, "💡 El ratio actual no cumple la condición o no hay cotizaciones disponibles")
                     self._update_progress(operation_id, current_step=OperationStep.WAITING_FOR_BETTER_PRICES)
                     await self._notify_progress(operation_id, progress)
                     await asyncio.sleep(10)  # Esperar 10 segundos antes del siguiente intento
