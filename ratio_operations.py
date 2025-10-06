@@ -274,11 +274,14 @@ class RatioOperationManager:
         if not instrument_to_sell or not instrument_to_buy:
             return 0.0
         
-        # Obtener cotizaciones actuales
-        sell_quote = quotes_cache.get(instrument_to_sell)
-        buy_quote = quotes_cache.get(instrument_to_buy)
+        # Obtener cotizaciones actuales usando la función real
+        from ratios_worker import obtener_datos_mercado
+        
+        sell_quote = obtener_datos_mercado(instrument_to_sell)
+        buy_quote = obtener_datos_mercado(instrument_to_buy)
         
         if not sell_quote or not buy_quote:
+            print(f"[ratio_ops] No hay cotizaciones reales para {instrument_to_sell} o {instrument_to_buy}")
             return 0.0
         
         # Calcular ratio teórico con cotizaciones actuales
@@ -633,9 +636,14 @@ class RatioOperationManager:
             self._add_message(operation_id, f"   Ratio promedio final: {final_weighted_avg:.6f}")
             self._add_message(operation_id, f"   Condición cumplida: {'✅ SÍ' if final_condition_met else '❌ NO'}")
             
-            if final_condition_met:
+            # Verificar que realmente se ejecutaron lotes antes de marcar como exitosa
+            if progress.batch_count > 0 and progress.completed_nominales > 0 and final_condition_met:
                 progress.status = OperationStatus.COMPLETED
                 self._add_message(operation_id, "🎉 ¡Operación completada exitosamente!")
+            elif progress.batch_count == 0 or progress.completed_nominales == 0:
+                progress.status = OperationStatus.FAILED
+                progress.error = "No se ejecutaron lotes - operación cancelada o sin cotizaciones disponibles"
+                self._add_message(operation_id, "❌ Operación fallida: No se ejecutaron lotes")
             else:
                 progress.status = OperationStatus.FAILED
                 progress.error = f"Ratio promedio {final_weighted_avg:.6f} no cumple condición {progress.condition} {progress.target_ratio}"
