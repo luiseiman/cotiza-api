@@ -381,16 +381,21 @@ class RatioOperationManager:
             if not instrument_to_sell or not instrument_to_buy:
                 return False
             
-            # Obtener cotizaciones
-            sell_quote = quotes_cache.get(instrument_to_sell)
-            buy_quote = quotes_cache.get(instrument_to_buy)
+            # Obtener cotizaciones usando la función real
+            from ratios_worker import obtener_datos_mercado
+            
+            sell_quote = obtener_datos_mercado(instrument_to_sell)
+            buy_quote = obtener_datos_mercado(instrument_to_buy)
             
             if not sell_quote or not buy_quote:
+                self._add_message(operation_id, f"❌ No hay cotizaciones reales para ejecutar el lote")
                 return False
             
             # Ejecutar venta
             sell_price = sell_quote['bid']
             client_order_id_sell = f"RATIO_SELL_{operation_id}_{progress.batch_count}_{int(time.time())}"
+            
+            self._add_message(operation_id, f"💰 Ejecutando venta: {batch_size} nominales de {instrument_to_sell} @ {sell_price}")
             
             sell_result = ws_rofex.manager.send_order(
                 symbol=instrument_to_sell,
@@ -401,6 +406,8 @@ class RatioOperationManager:
                 tif="DAY",
                 client_order_id=client_order_id_sell
             )
+            
+            self._add_message(operation_id, f"📊 Resultado venta: {sell_result}")
             
             if sell_result.get("status") != "ok":
                 self._add_message(operation_id, f"❌ Error en venta del lote: {sell_result.get('message', 'Unknown error')}")
@@ -413,6 +420,8 @@ class RatioOperationManager:
             nominales_to_buy = (batch_size * sell_price) / buy_price
             client_order_id_buy = f"RATIO_BUY_{operation_id}_{progress.batch_count}_{int(time.time())}"
             
+            self._add_message(operation_id, f"💰 Ejecutando compra: {nominales_to_buy:.2f} nominales de {instrument_to_buy} @ {buy_price}")
+            
             buy_result = ws_rofex.manager.send_order(
                 symbol=instrument_to_buy,
                 side="BUY",
@@ -422,6 +431,8 @@ class RatioOperationManager:
                 tif="DAY",
                 client_order_id=client_order_id_buy
             )
+            
+            self._add_message(operation_id, f"📊 Resultado compra: {buy_result}")
             
             if buy_result.get("status") != "ok":
                 self._add_message(operation_id, f"❌ Error en compra del lote: {buy_result.get('message', 'Unknown error')}")
