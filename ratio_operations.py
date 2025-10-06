@@ -95,6 +95,11 @@ class OperationProgress:
     current_attempt: int = 0  # Intento actual
     condition: str = ""  # Condición de ratio (<= o >=)
     pair: str | List[str] = ""  # Par de instrumentos
+    # Campos adicionales para información detallada
+    current_batch_size: float = 0.0  # Tamaño del lote actual
+    success_rate: float = 0.0  # Porcentaje de éxito (lotes exitosos / intentos)
+    estimated_completion_time: str = ""  # Tiempo estimado de finalización
+    market_condition: str = ""  # Condición del mercado (favorable/desfavorable)
 
 
 class RatioOperationManager:
@@ -113,9 +118,57 @@ class RatioOperationManager:
     async def _notify_progress(self, operation_id: str, progress: OperationProgress):
         if operation_id in self.callbacks:
             try:
+                # Actualizar campos adicionales antes de notificar
+                self._update_progress_fields(operation_id, progress)
                 await self.callbacks[operation_id](progress)
             except Exception as e:
                 print(f"[ratio_ops] Error en callback: {e}")
+
+    def _update_progress_fields(self, operation_id: str, progress: OperationProgress):
+        """Actualiza campos adicionales para información detallada"""
+        if operation_id not in self.active_operations:
+            return
+            
+        # Usar el lock para actualizar de forma segura
+        with self.operation_lock:
+            if operation_id not in self.active_operations:
+                return
+                
+            current_progress = self.active_operations[operation_id]
+            
+            # Calcular porcentaje de éxito
+            if progress.current_attempt > 0:
+                current_progress.success_rate = (progress.batch_count / progress.current_attempt) * 100
+            else:
+                current_progress.success_rate = 0.0
+            
+            # Determinar condición del mercado
+            if progress.weighted_average_ratio > 0:
+                condition_met = self._check_condition(progress.weighted_average_ratio, progress.target_ratio, progress.condition)
+                current_progress.market_condition = "favorable" if condition_met else "desfavorable"
+            else:
+                current_progress.market_condition = "evaluando"
+            
+            # Estimar tiempo de finalización (muy básico)
+            if progress.current_attempt > 0 and progress.remaining_nominales > 0:
+                # Estimación basada en el progreso actual
+                avg_nominales_per_attempt = progress.completed_nominales / max(progress.current_attempt, 1)
+                remaining_attempts = progress.remaining_nominales / max(avg_nominales_per_attempt, 0.1)
+                estimated_seconds = remaining_attempts * 5  # 5 segundos promedio por intento
+                
+                if estimated_seconds < 60:
+                    current_progress.estimated_completion_time = f"{int(estimated_seconds)}s"
+                elif estimated_seconds < 3600:
+                    current_progress.estimated_completion_time = f"{int(estimated_seconds/60)}m {int(estimated_seconds%60)}s"
+                else:
+                    current_progress.estimated_completion_time = f"{int(estimated_seconds/3600)}h {int((estimated_seconds%3600)/60)}m"
+            else:
+                current_progress.estimated_completion_time = "calculando..."
+            
+            # Actualizar también en el objeto progress que se pasa por parámetro
+            progress.success_rate = current_progress.success_rate
+            progress.market_condition = current_progress.market_condition
+            progress.estimated_completion_time = current_progress.estimated_completion_time
 
     def _update_progress(self, operation_id: str, **updates):
         with self.operation_lock:
@@ -523,6 +576,9 @@ class RatioOperationManager:
                 
                 batch_size = min(max_batch_size, progress.remaining_nominales)
                 self._add_message(operation_id, f"📊 Lote {progress.batch_count + 1}: {batch_size} nominales")
+                
+                # Actualizar tamaño del lote actual
+                self._update_progress(operation_id, current_batch_size=batch_size)
                 
                 # Ejecutar el lote
                 self._update_progress(operation_id, current_step=OperationStep.EXECUTING_BATCH)
