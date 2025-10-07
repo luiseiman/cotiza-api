@@ -831,7 +831,7 @@ class RatioOperationManager:
                         print(f"[DEBUG] Agregando mensaje de lote para {operation_id}")
                         self._add_message(operation_id, f"📊 Lote 1: {batch_size} nominales")
                         print(f"[DEBUG] Mensaje de lote agregado para {operation_id}")
-                except Exception as e:
+                    except Exception as e:
                         print(f"[DEBUG] ERROR al agregar mensaje de lote: {e}")
                         self._add_message(operation_id, f"❌ Error agregando mensaje de lote: {e}")
                     print(f"[DEBUG] DESPUÉS del try-catch para {operation_id}")
@@ -849,7 +849,7 @@ class RatioOperationManager:
                     self._update_progress(operation_id, current_step=OperationStep.EXECUTING_BATCH)
                     print(f"[DEBUG] *** PUNTO CRÍTICO 3: Después de actualizar step para {operation_id} ***")
                     print(f"[DEBUG] ANTES de _notify_progress en línea 705 para {operation_id}")
-            await self._notify_progress(operation_id, progress)
+                    await self._notify_progress(operation_id, progress)
                     print(f"[DEBUG] *** PUNTO CRÍTICO 4: Después de _notify_progress para {operation_id} ***")
                     print(f"[DEBUG] DESPUÉS de _notify_progress en línea 705 para {operation_id}")
                     
@@ -865,12 +865,12 @@ class RatioOperationManager:
                     
                     if not success:
                         self._add_message(operation_id, "❌ Error ejecutando lote, reintentando...")
-            await asyncio.sleep(2)
+                        await asyncio.sleep(2)
                         continue
                     
                     # Calcular ratio promedio ponderado
                     self._update_progress(operation_id, current_step=OperationStep.CALCULATING_WEIGHTED_AVERAGE)
-            await self._notify_progress(operation_id, progress)
+                    await self._notify_progress(operation_id, progress)
                     
                     weighted_avg = self._calculate_weighted_average_ratio(progress)
                     progress.weighted_average_ratio = weighted_avg
@@ -888,8 +888,8 @@ class RatioOperationManager:
                     else:
                         self._add_message(operation_id, "⚠️ Promedio no cumple condición, pero continuamos para completar...")
                     
-            await self._notify_progress(operation_id, progress)
-            await asyncio.sleep(1)  # Pequeña pausa entre lotes
+                    await self._notify_progress(operation_id, progress)
+                    await asyncio.sleep(1)  # Pequeña pausa entre lotes
             
             except Exception as e:
                 print(f"[DEBUG] ERROR en bucle principal: {e}")
@@ -985,7 +985,7 @@ class RatioOperationManager:
                     # Usar versión sin lock para evitar deadlock
                     self._add_message_unlocked(operation_id, "🛑 Operación cancelada")
                     return True
-        return False
+            return False
         finally:
             self.operation_lock.release()
 
