@@ -232,34 +232,15 @@ class RealRatioOperationManager:
                     error_msg = result.get('message', 'Error desconocido') if result else 'No se recibió respuesta'
                     self._add_message(operation_id, f"❌ Orden {side.upper()} rechazada: {error_msg}")
                     
-                    # Si es error de conexión, usar fallback simulado
+                    # No usar fallback simulado - fallar directamente
                     if result and result.get('message') == 'ws_not_connected':
-                        self._add_message(operation_id, f"⚠️ WebSocket no conectado, simulando orden {side.upper()}")
-                        order_execution = OrderExecution(
-                            instrument=instrument,
-                            quantity=quantity,
-                            price=price,
-                            order_id=f"SIM_{operation_id}_{side}_{datetime.now().strftime('%H%M%S')}",
-                            timestamp=datetime.now().isoformat(),
-                            side=side,
-                            status="filled"
-                        )
-                        return order_execution
+                        self._add_message(operation_id, f"❌ WebSocket ROFEX no conectado - operación fallida")
                     
                     return None
             else:
-                # Fallback: simular orden si ws_rofex no está disponible
-                self._add_message(operation_id, f"⚠️ Simulando orden {side.upper()} (ws_rofex no disponible)")
-                order_execution = OrderExecution(
-                    instrument=instrument,
-                    quantity=quantity,
-                    price=price,
-                    order_id=f"SIM_{operation_id}_{side}_{datetime.now().strftime('%H%M%S')}",
-                    timestamp=datetime.now().isoformat(),
-                    side=side,
-                    status="filled"
-                )
-                return order_execution
+                # ws_rofex no está disponible - operación fallida
+                self._add_message(operation_id, f"❌ ws_rofex no disponible - operación fallida")
+                return None
                 
         except Exception as e:
             self._add_message(operation_id, f"❌ Error ejecutando orden {side.upper()}: {str(e)}")
@@ -364,11 +345,17 @@ class RealRatioOperationManager:
             sell_price
         )
         
-        if sell_order:
-            progress.sell_orders.append(sell_order)
-            progress.total_sold_amount = sell_order.quantity * sell_order.price
-            progress.average_sell_price = sell_order.price
-            self._add_message(operation_id, f"✅ Orden de venta ejecutada: {sell_order.order_id}")
+        if not sell_order:
+            progress.status = OperationStatus.FAILED
+            progress.error = "Error ejecutando orden de venta"
+            self._add_message(operation_id, "❌ Operación fallida: no se pudo ejecutar orden de venta")
+            await self._notify_progress(operation_id, progress)
+            return progress
+        
+        progress.sell_orders.append(sell_order)
+        progress.total_sold_amount = sell_order.quantity * sell_order.price
+        progress.average_sell_price = sell_order.price
+        self._add_message(operation_id, f"✅ Orden de venta ejecutada: {sell_order.order_id}")
         
         # Ejecutar orden de compra
         buy_price = buy_quotes.get('bid', 1050.0)
@@ -380,11 +367,17 @@ class RealRatioOperationManager:
             buy_price
         )
         
-        if buy_order:
-            progress.buy_orders.append(buy_order)
-            progress.total_bought_amount = buy_order.quantity * buy_order.price
-            progress.average_buy_price = buy_order.price
-            self._add_message(operation_id, f"✅ Orden de compra ejecutada: {buy_order.order_id}")
+        if not buy_order:
+            progress.status = OperationStatus.FAILED
+            progress.error = "Error ejecutando orden de compra"
+            self._add_message(operation_id, "❌ Operación fallida: no se pudo ejecutar orden de compra")
+            await self._notify_progress(operation_id, progress)
+            return progress
+        
+        progress.buy_orders.append(buy_order)
+        progress.total_bought_amount = buy_order.quantity * buy_order.price
+        progress.average_buy_price = buy_order.price
+        self._add_message(operation_id, f"✅ Orden de compra ejecutada: {buy_order.order_id}")
         
         # Calcular ratio final de las órdenes ejecutadas
         if progress.total_bought_amount > 0:
@@ -408,6 +401,10 @@ class RealRatioOperationManager:
         
         print(f"[DEBUG] Operación {operation_id} completada con órdenes reales")
         return progress
+    
+    def get_operation_status(self, operation_id: str) -> Optional[OperationProgress]:
+        """Obtiene el estado de una operación"""
+        return self.active_operations.get(operation_id)
 
 # Instancia global
 real_ratio_manager = RealRatioOperationManager()

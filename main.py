@@ -909,6 +909,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         try:
                             from ratio_operations import ratio_manager
                             from ratio_operations_simple import simple_ratio_manager, RatioOperationRequest
+                            from ratio_operations_real import real_ratio_manager
                             import uuid
                             required_params = ["pair", "instrument_to_sell", "nominales", "target_ratio", "condition", "client_id"]
                             missing_params = [p for p in required_params if p not in message]
@@ -950,8 +951,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                     "error": progress.error,
                                     "timestamp": time.time()
                                 }))
-                            simple_ratio_manager.register_callback(operation_id, progress_callback)
-                            asyncio.create_task(simple_ratio_manager.execute_ratio_operation_batch(request))
+                            real_ratio_manager.register_callback(operation_id, progress_callback)
+                            asyncio.create_task(real_ratio_manager.execute_ratio_operation_batch(request))
                             await websocket.send_text(json.dumps({
                                 "type": "ratio_operation_started",
                                 "operation_id": operation_id,
@@ -968,6 +969,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         try:
                             from ratio_operations import ratio_manager
                             from ratio_operations_simple import simple_ratio_manager
+                            from ratio_operations_real import real_ratio_manager
                             operation_id = message.get("operation_id")
                             if not operation_id:
                                 await websocket.send_text(json.dumps({
@@ -976,7 +978,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                     "timestamp": time.time()
                                 }))
                                 continue
-                            progress = ratio_manager.get_operation_status(operation_id)
+                            progress = real_ratio_manager.get_operation_status(operation_id)
                             if progress:
                                 await websocket.send_text(json.dumps({
                                     "type": "ratio_operation_status",
