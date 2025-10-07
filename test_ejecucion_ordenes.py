@@ -37,10 +37,28 @@ async def test_ejecucion_ordenes():
         ordenes_ejecutadas = 0
         mensajes_vistos = set()
         
-        # Escuchar mensajes de progreso
+        # Escuchar mensajes de progreso por tiempo limitado
+        start_time = asyncio.get_event_loop().time()
+        max_duration = 15  # 15 segundos máximo
+        
         try:
             while True:
-                message = await asyncio.wait_for(ws.recv(), timeout=15)
+                elapsed = asyncio.get_event_loop().time() - start_time
+                remaining = max_duration - elapsed
+                
+                if remaining <= 0:
+                    print(f"\n⏰ Tiempo límite alcanzado ({max_duration}s)")
+                    # Cancelar la operación antes de salir
+                    if operation_id:
+                        cancel_request = {
+                            "action": "cancel_ratio_operation",
+                            "operation_id": operation_id
+                        }
+                        await ws.send(json.dumps(cancel_request))
+                        print(f"🛑 Operación cancelada: {operation_id}")
+                    break
+                
+                message = await asyncio.wait_for(ws.recv(), timeout=min(2, remaining))
                 data = json.loads(message)
                 
                 if data['type'] == 'ratio_operation_started':
@@ -56,7 +74,9 @@ async def test_ejecucion_ordenes():
                         if msg not in mensajes_vistos:
                             mensajes_vistos.add(msg)
                             
-                            if "Ejecutando venta:" in msg:
+                            if "DEBUG:" in msg or "🔍" in msg:
+                                print(f"🔍 {msg}")
+                            elif "Ejecutando venta:" in msg:
                                 print(f"💰 {msg}")
                                 ordenes_ejecutadas += 1
                             elif "Ejecutando compra:" in msg:
@@ -74,6 +94,8 @@ async def test_ejecucion_ordenes():
                                 print(f"📈 {msg}")
                             elif "Condición:" in msg:
                                 print(f"✅ {msg}")
+                            elif "max_batch_size" in msg or "remaining_nominales" in msg:
+                                print(f"🔍 {msg}")
                     
                     # Mostrar progreso
                     current_ratio = data.get('current_ratio', 0)

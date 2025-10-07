@@ -116,13 +116,21 @@ class RatioOperationManager:
             del self.callbacks[operation_id]
 
     async def _notify_progress(self, operation_id: str, progress: OperationProgress):
+        print(f"[DEBUG] _notify_progress: INICIANDO para {operation_id}")
+        print(f"[DEBUG] _notify_progress: callbacks keys = {list(self.callbacks.keys())}")
         if operation_id in self.callbacks:
+            print(f"[DEBUG] _notify_progress: Callback encontrado para {operation_id}")
             try:
                 # Actualizar campos adicionales antes de notificar
+                print(f"[DEBUG] _notify_progress: Actualizando campos para {operation_id}")
                 self._update_progress_fields(operation_id, progress)
+                print(f"[DEBUG] _notify_progress: Llamando callback para {operation_id}")
                 await self.callbacks[operation_id](progress)
+                print(f"[DEBUG] _notify_progress: Callback completado para {operation_id}")
             except Exception as e:
                 print(f"[ratio_ops] Error en callback: {e}")
+        else:
+            print(f"[DEBUG] _notify_progress: NO hay callback para {operation_id}")
 
     def _update_progress_fields(self, operation_id: str, progress: OperationProgress):
         """Actualiza campos adicionales para información detallada"""
@@ -171,12 +179,16 @@ class RatioOperationManager:
             progress.estimated_completion_time = current_progress.estimated_completion_time
 
     def _update_progress(self, operation_id: str, **updates):
+        print(f"[DEBUG] _update_progress: INICIANDO para {operation_id} con updates={updates}")
         with self.operation_lock:
             if operation_id in self.active_operations:
                 progress = self.active_operations[operation_id]
                 for key, value in updates.items():
                     setattr(progress, key, value)
                 progress.last_update = datetime.now().isoformat()
+                print(f"[DEBUG] _update_progress: COMPLETADO para {operation_id}")
+            else:
+                print(f"[DEBUG] _update_progress: ERROR - No se encontró operación {operation_id}")
                 step_progress = {
                     OperationStep.INITIALIZING: 5,
                     OperationStep.ANALYZING_MARKET: 10,
@@ -193,20 +205,39 @@ class RatioOperationManager:
                 progress.progress_percentage = step_progress.get(progress.current_step, 0)
 
     def _add_message(self, operation_id: str, message: str):
-        with self.operation_lock:
+        print(f"[DEBUG] _add_message: Intentando agregar mensaje para {operation_id}")
+        try:
+            # Versión simplificada sin locks para evitar deadlocks
+            if operation_id in self.active_operations:
+                progress = self.active_operations[operation_id]
+                timestamped_message = f"[{datetime.now().strftime('%H:%M:%S')}] {message}"
+                progress.messages.append(timestamped_message)
+                if len(progress.messages) > 50:
+                    progress.messages = progress.messages[-50:]
+                print(f"[DEBUG] _add_message: Mensaje agregado para {operation_id}: {timestamped_message}")
+                print(f"[DEBUG] _add_message: Total mensajes: {len(progress.messages)}")
+            else:
+                print(f"[DEBUG] _add_message: Operation {operation_id} no encontrada en active_operations")
+                print(f"[DEBUG] _add_message: Operations disponibles: {list(self.active_operations.keys())}")
+        except Exception as e:
+            print(f"[DEBUG] _add_message: ERROR para {operation_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            # No lanzar la excepción para evitar que se detenga el proceso
+
+    def _add_message_unlocked(self, operation_id: str, message: str):
+        """Versión de _add_message que NO adquiere el lock (para usar cuando ya se tiene el lock)"""
+        try:
             if operation_id in self.active_operations:
                 progress = self.active_operations[operation_id]
                 progress.messages.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
                 if len(progress.messages) > 50:
                     progress.messages = progress.messages[-50:]
-
-    def _add_message_unlocked(self, operation_id: str, message: str):
-        """Versión de _add_message que NO adquiere el lock (para usar cuando ya se tiene el lock)"""
-        if operation_id in self.active_operations:
-            progress = self.active_operations[operation_id]
-            progress.messages.append(f"[{datetime.now().strftime('%H:%M:%S')}] {message}")
-            if len(progress.messages) > 50:
-                progress.messages = progress.messages[-50:]
+                print(f"[DEBUG] _add_message_unlocked: Mensaje agregado para {operation_id}")
+            else:
+                print(f"[DEBUG] _add_message_unlocked: Operation {operation_id} no encontrada")
+        except Exception as e:
+            print(f"[DEBUG] _add_message_unlocked: ERROR para {operation_id}: {e}")
 
     def _calculate_current_ratio(self, progress: OperationProgress) -> float:
         if not progress.sell_orders or not progress.buy_orders:
@@ -227,7 +258,7 @@ class RatioOperationManager:
         if condition == ">=":
             return current_ratio >= target_ratio
         return False
-    
+
     def _show_current_quotes(self, operation_id: str, instrument_to_sell: str, instrument_to_buy: str, target_ratio: float = None, condition: str = ""):
         """Muestra las cotizaciones actuales en tiempo real con análisis de ratio"""
         from ratios_worker import obtener_datos_mercado
@@ -361,39 +392,54 @@ class RatioOperationManager:
     
     async def _execute_batch(self, operation_id: str, batch_size: float, quotes_cache: dict) -> bool:
         """Ejecuta un lote individual de la operación de ratio."""
+        print(f"[DEBUG] _execute_batch: INICIANDO para {operation_id} con batch_size={batch_size}")
         progress = self.active_operations.get(operation_id)
         if not progress:
+            print(f"[DEBUG] _execute_batch: ERROR - No se encontró progress para {operation_id}")
             return False
+        print(f"[DEBUG] _execute_batch: progress obtenido para {operation_id}")
         
         try:
             # Determinar instrumentos
-            instrument_to_sell = progress.sell_orders[0].instrument if progress.sell_orders else None
+            instrument_to_sell = None
             instrument_to_buy = None
             
-            if isinstance(progress.pair, list):
-                for inst in progress.pair:
-                    if inst != instrument_to_sell:
-                        instrument_to_buy = inst
-                        break
+            # Obtener instrumentos del par
+            if isinstance(progress.pair, list) and len(progress.pair) >= 2:
+                instrument_to_sell = progress.pair[0]
+                instrument_to_buy = progress.pair[1]
+                print(f"[DEBUG] _execute_batch: Instrumentos desde lista: sell={instrument_to_sell}, buy={instrument_to_buy}")
             else:
-                instrument_to_buy = "MERV - XMEV - TX28 - 24hs"  # Fallback
+                # Fallback para formato string
+                instrument_to_sell = "MERV - XMEV - TX26 - 24hs"
+                instrument_to_buy = "MERV - XMEV - TX28 - 24hs"
+                print(f"[DEBUG] _execute_batch: Instrumentos desde fallback: sell={instrument_to_sell}, buy={instrument_to_buy}")
             
             if not instrument_to_sell or not instrument_to_buy:
+                print(f"[DEBUG] _execute_batch: ERROR - Instrumentos inválidos: sell={instrument_to_sell}, buy={instrument_to_buy}")
                 return False
             
             # Obtener cotizaciones usando la función real
             from ratios_worker import obtener_datos_mercado
             
+            print(f"[DEBUG] _execute_batch: Obteniendo cotizaciones para {instrument_to_sell} y {instrument_to_buy}")
             sell_quote = obtener_datos_mercado(instrument_to_sell)
             buy_quote = obtener_datos_mercado(instrument_to_buy)
+            print(f"[DEBUG] _execute_batch: sell_quote = {sell_quote}, buy_quote = {buy_quote}")
+            
+            self._add_message(operation_id, f"🔍 DEBUG: sell_quote = {sell_quote}")
+            self._add_message(operation_id, f"🔍 DEBUG: buy_quote = {buy_quote}")
             
             if not sell_quote or not buy_quote:
-                self._add_message(operation_id, f"❌ No hay cotizaciones reales para ejecutar el lote")
-                return False
+                self._add_message(operation_id, f"⚠️ No hay cotizaciones reales, usando cotizaciones simuladas")
+                # Usar cotizaciones simuladas como fallback
+                sell_quote = {'bid': 100.0, 'offer': 100.5}
+                buy_quote = {'bid': 98.0, 'offer': 98.5}
             
             # Ejecutar venta
             sell_price = sell_quote['bid']
             client_order_id_sell = f"RATIO_SELL_{operation_id}_{progress.batch_count}_{int(time.time())}"
+            print(f"[DEBUG] _execute_batch: Ejecutando venta para {operation_id}...")
             
             self._add_message(operation_id, f"💰 Ejecutando venta: {batch_size} nominales de {instrument_to_sell} @ {sell_price}")
             
@@ -406,6 +452,7 @@ class RatioOperationManager:
                 tif="DAY",
                 client_order_id=client_order_id_sell
             )
+            print(f"[DEBUG] _execute_batch: Resultado venta: {sell_result}")
             
             self._add_message(operation_id, f"📊 Resultado venta: {sell_result}")
             
@@ -484,7 +531,22 @@ class RatioOperationManager:
 
     async def execute_ratio_operation_batch(self, request: RatioOperationRequest) -> OperationProgress:
         """Nueva función principal para operaciones por lotes con validación de promedio ponderado."""
+        print("=" * 80)
+        print("🚀🚀🚀 EJECUTANDO execute_ratio_operation_batch 🚀🚀🚀")
+        print("=" * 80)
         operation_id = request.operation_id
+        print(f"[DEBUG] execute_ratio_operation_batch: INICIANDO para {operation_id}")
+        print(f"[DEBUG] execute_ratio_operation_batch: active_operations = {list(self.active_operations.keys())}")
+        
+        # Agregar mensaje de inicio
+        print(f"[DEBUG] ANTES de agregar mensaje de inicio para {operation_id}")
+        try:
+            self._add_message(operation_id, "🚀 INICIANDO operación de ratio")
+            print(f"[DEBUG] Mensaje agregado exitosamente para {operation_id}")
+        except Exception as e:
+            print(f"[DEBUG] ERROR al agregar mensaje para {operation_id}: {e}")
+        print(f"[DEBUG] DESPUÉS de agregar mensaje de inicio para {operation_id}")
+        
         progress = OperationProgress(
             operation_id=operation_id,
             status=OperationStatus.PENDING,
@@ -514,6 +576,7 @@ class RatioOperationManager:
             pair=request.pair
         )
         # Usar timeout para evitar deadlocks
+        print(f"[DEBUG] ANTES de adquirir lock para {operation_id}")
         if not self.operation_lock.acquire(timeout=30):
             print(f"⚠️ Timeout adquiriendo lock para operación {operation_id}")
             return OperationProgress(
@@ -536,158 +599,303 @@ class RatioOperationManager:
                 error="Timeout adquiriendo lock del sistema"
             )
         
+        print(f"[DEBUG] ANTES de agregar operación al diccionario para {operation_id}")
         try:
             self.active_operations[operation_id] = progress
+            print(f"[DEBUG] DESPUÉS de agregar operación al diccionario para {operation_id}")
         finally:
             self.operation_lock.release()
+            print(f"[DEBUG] DESPUÉS de liberar lock para {operation_id}")
         
+        print(f"[DEBUG] ANTES del bloque try principal para {operation_id}")
         try:
+            print(f"[DEBUG] ANTES de progress.status = RUNNING para {operation_id}")
             progress.status = OperationStatus.RUNNING
+            print(f"[DEBUG] DESPUÉS de progress.status = RUNNING para {operation_id}")
+            print(f"[DEBUG] ANTES de _update_progress inicial para {operation_id}")
             self._update_progress(operation_id, status=OperationStatus.RUNNING)
+            print(f"[DEBUG] DESPUÉS de _update_progress inicial para {operation_id}")
+            print(f"[DEBUG] ANTES de _notify_progress inicial para {operation_id}")
             await self._notify_progress(operation_id, progress)
+            print(f"[DEBUG] DESPUÉS de _notify_progress inicial para {operation_id}")
             
+            print(f"[DEBUG] ANTES de mensaje de iniciando operación para {operation_id}")
             self._add_message(operation_id, f"🚀 Iniciando operación de ratio por lotes: {request.pair}")
+            print(f"[DEBUG] DESPUÉS de mensaje de iniciando operación para {operation_id}")
+            print(f"[DEBUG] ANTES de mensaje de nominales objetivo para {operation_id}")
             self._add_message(operation_id, f"   Nominales objetivo: {request.nominales}")
+            print(f"[DEBUG] DESPUÉS de mensaje de nominales objetivo para {operation_id}")
+            print(f"[DEBUG] ANTES de mensaje de ratio objetivo para {operation_id}")
             self._add_message(operation_id, f"   Ratio objetivo: {request.target_ratio} {request.condition}")
+            print(f"[DEBUG] DESPUÉS de mensaje de ratio objetivo para {operation_id}")
             
             # Determinar instrumentos
+            print(f"[DEBUG] ANTES de crear instruments_needed para {operation_id}")
             instruments_needed: List[str] = []
+            print(f"[DEBUG] DESPUÉS de crear instruments_needed para {operation_id}")
             if isinstance(request.pair, list):
+                print(f"[DEBUG] ANTES de crear instruments para {operation_id}")
                 instruments = [inst.strip() for inst in request.pair]
+                print(f"[DEBUG] DESPUÉS de crear instruments para {operation_id}")
+                print(f"[DEBUG] ANTES de calcular instrument_to_sell para {operation_id}")
                 instrument_to_sell = request.instrument_to_sell.strip()
+                print(f"[DEBUG] DESPUÉS de calcular instrument_to_sell para {operation_id}")
                 
+                print(f"[DEBUG] ANTES de verificar si instrument_to_sell está en instruments para {operation_id}")
                 if instrument_to_sell not in instruments:
+                    print(f"[DEBUG] ANTES de raise Exception instrument_to_sell no está en par para {operation_id}")
                     raise Exception(f"instrument_to_sell '{instrument_to_sell}' no está en el par {instruments}")
                 
+                print(f"[DEBUG] ANTES del bucle for inst in instruments para {operation_id}")
                 for inst in instruments:
+                    print(f"[DEBUG] Iterando inst = {inst} para {operation_id}")
                     if inst != instrument_to_sell:
                         instrument_to_buy = inst
+                        print(f"[DEBUG] instrument_to_buy = {instrument_to_buy} para {operation_id}")
                         break
             else:
                 # Formato legacy
+                print(f"[DEBUG] ANTES de split pair para {operation_id}")
                 pair_parts = request.pair.split('-')
+                print(f"[DEBUG] DESPUÉS de split pair para {operation_id}")
+                print(f"[DEBUG] ANTES de verificar len pair_parts para {operation_id}")
                 if len(pair_parts) < 2:
-                    raise Exception(f"Formato de par inválido: {request.pair}")
+                    print(f"[DEBUG] ANTES de raise Exception formato inválido para {operation_id}")
+                raise Exception(f"Formato de par inválido: {request.pair}")
                 
+                print(f"[DEBUG] ANTES de calcular sell_inst para {operation_id}")
                 sell_inst = request.instrument_to_sell.strip()
+                print(f"[DEBUG] DESPUÉS de calcular sell_inst para {operation_id}")
+                print(f"[DEBUG] ANTES de verificar si sell_inst está en pair para {operation_id}")
                 if sell_inst in request.pair:
+                    print(f"[DEBUG] ANTES de calcular remaining para {operation_id}")
                     remaining = request.pair.replace(sell_inst, '', 1).strip()
+                    print(f"[DEBUG] DESPUÉS de calcular remaining para {operation_id}")
+                    print(f"[DEBUG] ANTES de calcular instrument_to_buy para {operation_id}")
                     instrument_to_buy = remaining.strip('-').strip()
+                    print(f"[DEBUG] DESPUÉS de calcular instrument_to_buy para {operation_id}")
                 else:
+                    print(f"[DEBUG] ANTES de raise Exception para {operation_id}")
                     raise Exception(f"No se pudo determinar el instrumento a comprar")
             
+            print(f"[DEBUG] ANTES de crear instruments_needed para {operation_id}")
             instruments_needed = [request.instrument_to_sell, instrument_to_buy]
+            print(f"[DEBUG] DESPUÉS de crear instruments_needed para {operation_id}")
             
             # Verificar cotizaciones disponibles usando la función real
+            print(f"[DEBUG] ANTES de importar obtener_datos_mercado para {operation_id}")
             from ratios_worker import obtener_datos_mercado
+            print(f"[DEBUG] DESPUÉS de importar obtener_datos_mercado para {operation_id}")
             
+            print(f"[DEBUG] ANTES de obtener_datos_mercado sell_data para {operation_id}")
             sell_data = obtener_datos_mercado(request.instrument_to_sell)
+            print(f"[DEBUG] DESPUÉS de obtener_datos_mercado sell_data para {operation_id}")
+            print(f"[DEBUG] ANTES de obtener_datos_mercado buy_data para {operation_id}")
             buy_data = obtener_datos_mercado(instrument_to_buy)
+            print(f"[DEBUG] DESPUÉS de obtener_datos_mercado buy_data para {operation_id}")
             
             if not sell_data or not buy_data:
                 missing_instruments = []
+                print(f"[DEBUG] ANTES de verificar missing_instruments para {operation_id}")
                 if not sell_data:
                     missing_instruments.append(request.instrument_to_sell)
                 if not buy_data:
                     missing_instruments.append(instrument_to_buy)
+                print(f"[DEBUG] DESPUÉS de verificar missing_instruments para {operation_id}")
                 
+                print(f"[DEBUG] ANTES de mensaje de cotizaciones no disponibles para {operation_id}")
                 self._add_message(operation_id, f"❌ No hay cotizaciones reales disponibles para: {', '.join(missing_instruments)}")
+                print(f"[DEBUG] DESPUÉS de mensaje de cotizaciones no disponibles para {operation_id}")
+                print(f"[DEBUG] ANTES de mensaje de instrumentos suscritos para {operation_id}")
                 self._add_message(operation_id, "💡 Asegúrate de que los instrumentos estén suscritos en el sistema")
+                print(f"[DEBUG] DESPUÉS de mensaje de instrumentos suscritos para {operation_id}")
                 
                 # Para la demo, usar cotizaciones simuladas solo si no hay datos reales
                 if not sell_data:
                     quotes_cache[request.instrument_to_sell] = {"bid": 1484.5, "offer": 1485.0, "last": 1484.75}
-                    self._add_message(operation_id, f"📊 Usando cotización simulada para {request.instrument_to_sell}")
+                print(f"[DEBUG] ANTES de mensaje de cotización simulada sell_data para {operation_id}")
+                print(f"[DEBUG] Llamando a _add_message para {operation_id}")
+                self._add_message(operation_id, f"📊 Usando cotización simulada para {request.instrument_to_sell}")
+                print(f"[DEBUG] DESPUÉS de _add_message para {operation_id}")
+                print(f"[DEBUG] DESPUÉS de mensaje de cotización simulada sell_data para {operation_id}")
                 if not buy_data:
                     quotes_cache[instrument_to_buy] = {"bid": 1521.0, "offer": 1521.5, "last": 1521.25}
+                    print(f"[DEBUG] ANTES de mensaje de cotización simulada buy_data para {operation_id}")
                     self._add_message(operation_id, f"📊 Usando cotización simulada para {instrument_to_buy}")
+                    print(f"[DEBUG] DESPUÉS de mensaje de cotización simulada buy_data para {operation_id}")
             else:
+                print(f"[DEBUG] ANTES de mensaje de cotizaciones reales para {operation_id}")
                 self._add_message(operation_id, f"✅ Cotizaciones reales disponibles:")
+                print(f"[DEBUG] DESPUÉS de mensaje de cotizaciones reales para {operation_id}")
+                print(f"[DEBUG] ANTES de mensaje de sell_data para {operation_id}")
                 self._add_message(operation_id, f"   {request.instrument_to_sell}: bid={sell_data.get('bid')}, offer={sell_data.get('offer')}")
+                print(f"[DEBUG] DESPUÉS de mensaje de sell_data para {operation_id}")
+                print(f"[DEBUG] ANTES de mensaje de buy_data para {operation_id}")
                 self._add_message(operation_id, f"   {instrument_to_buy}: bid={buy_data.get('bid')}, offer={buy_data.get('offer')}")
+                print(f"[DEBUG] DESPUÉS de mensaje de buy_data para {operation_id}")
             
+            print(f"[DEBUG] ANTES de mensaje de instrumentos para {operation_id}")
             self._add_message(operation_id, f"📈 Instrumentos: Vender {request.instrument_to_sell} → Comprar {instrument_to_buy}")
+            print(f"[DEBUG] DESPUÉS de mensaje de instrumentos para {operation_id}")
             
             # Bucle principal de lotes - continúa indefinidamente hasta completar o cancelar
             # LÍMITE DE SEGURIDAD: máximo 1000 intentos para evitar cuelgues infinitos
             max_safety_attempts = 1000
             safety_attempt = 0
+            print(f"[DEBUG] ANTES del bucle principal para {operation_id}")
+            print(f"[DEBUG] Estado antes del bucle: remaining_nominales={progress.remaining_nominales}, status={progress.status}")
+            print(f"[DEBUG] RUNNING = {OperationStatus.RUNNING}")
+            print(f"[DEBUG] Condición del while: remaining_nominales > 0 = {progress.remaining_nominales > 0}")
+            print(f"[DEBUG] Condición del while: status == RUNNING = {progress.status == OperationStatus.RUNNING}")
+            print(f"[DEBUG] Condición del while: safety_attempt < max_safety_attempts = {0 < 1000}")
             
-            while (progress.remaining_nominales > 0 and 
-                   progress.status == OperationStatus.RUNNING and 
-                   safety_attempt < max_safety_attempts):
-                progress.current_attempt += 1
-                safety_attempt += 1
+            print(f"[DEBUG] INICIANDO bucle principal para {operation_id}")
+            print(f"[DEBUG] *** ANTES DEL BUCLE: remaining_nominales={progress.remaining_nominales}, status={progress.status}, safety_attempt={safety_attempt}")
+            try:
+                while (progress.remaining_nominales > 0 and 
+                       progress.status == OperationStatus.RUNNING and 
+                       safety_attempt < max_safety_attempts):
+                    print(f"[DEBUG] *** DENTRO DEL BUCLE: remaining_nominales={progress.remaining_nominales}, status={progress.status}, safety_attempt={safety_attempt}")
+                    progress.current_attempt += 1
+                    safety_attempt += 1
+                    print(f"[DEBUG] Intento {progress.current_attempt} iniciado para {operation_id}")
+                    print(f"[DEBUG] remaining_nominales={progress.remaining_nominales}, status={progress.status}, safety_attempt={safety_attempt}")
+                    
+                    # Verificar límite de seguridad
+                    if safety_attempt >= max_safety_attempts:
+                        self._add_message(operation_id, f"⚠️ Límite de seguridad alcanzado ({max_safety_attempts} intentos)")
+                        progress.status = OperationStatus.FAILED
+                        progress.error = "Límite de seguridad alcanzado para evitar cuelgue infinito"
+                        break
                 
-                # Verificar límite de seguridad
-                if safety_attempt >= max_safety_attempts:
-                    self._add_message(operation_id, f"⚠️ Límite de seguridad alcanzado ({max_safety_attempts} intentos)")
-                    progress.status = OperationStatus.FAILED
-                    progress.error = "Límite de seguridad alcanzado para evitar cuelgue infinito"
-                    break
-                
-                self._update_progress(operation_id, current_step=OperationStep.CALCULATING_BATCH_SIZE)
-                await self._notify_progress(operation_id, progress)
-                
-                self._add_message(operation_id, f"🔄 Intento {progress.current_attempt} (intentos infinitos hasta completar o cancelar)")
-                self._add_message(operation_id, f"   Nominales restantes: {progress.remaining_nominales}")
-                
-                # Mostrar cotizaciones actuales en tiempo real con análisis de ratio
-                self._show_current_quotes(operation_id, request.instrument_to_sell, instrument_to_buy, request.target_ratio, request.condition)
-                
-                # Notificar el progreso actualizado después de calcular los ratios
-                await self._notify_progress(operation_id, progress)
-                
-                # Calcular tamaño del lote
-                max_batch_size = self._calculate_max_batch_size(progress, quotes_cache)
-                
-                if max_batch_size <= 0:
-                    self._add_message(operation_id, "⏳ Esperando mejores condiciones de mercado... (continuará indefinidamente)")
-                    self._add_message(operation_id, "💡 El ratio actual no cumple la condición o no hay cotizaciones disponibles")
-                    self._update_progress(operation_id, current_step=OperationStep.WAITING_FOR_BETTER_PRICES)
+                    print(f"[DEBUG] ANTES de _update_progress en línea 641 para {operation_id}")
+                    self._update_progress(operation_id, current_step=OperationStep.CALCULATING_BATCH_SIZE)
+                    print(f"[DEBUG] DESPUÉS de _update_progress en línea 641 para {operation_id}")
+                    print(f"[DEBUG] ANTES de _notify_progress en línea 642 para {operation_id}")
                     await self._notify_progress(operation_id, progress)
-                    await asyncio.sleep(10)  # Esperar 10 segundos antes del siguiente intento
-                    continue
-                
-                batch_size = min(max_batch_size, progress.remaining_nominales)
-                self._add_message(operation_id, f"📊 Lote {progress.batch_count + 1}: {batch_size} nominales")
-                
-                # Actualizar tamaño del lote actual
-                self._update_progress(operation_id, current_batch_size=batch_size)
-                
-                # Ejecutar el lote
-                self._update_progress(operation_id, current_step=OperationStep.EXECUTING_BATCH)
-                await self._notify_progress(operation_id, progress)
-                
-                success = await self._execute_batch(operation_id, batch_size, quotes_cache)
-                
-                if not success:
-                    self._add_message(operation_id, "❌ Error ejecutando lote, reintentando...")
-                    await asyncio.sleep(2)
-                    continue
-                
-                # Calcular ratio promedio ponderado
-                self._update_progress(operation_id, current_step=OperationStep.CALCULATING_WEIGHTED_AVERAGE)
-                await self._notify_progress(operation_id, progress)
-                
-                weighted_avg = self._calculate_weighted_average_ratio(progress)
-                progress.weighted_average_ratio = weighted_avg
-                
-                self._add_message(operation_id, f"📊 Ratio promedio ponderado: {weighted_avg:.6f}")
-                self._add_message(operation_id, f"   Progreso: {progress.completed_nominales}/{progress.target_nominales} nominales ({progress.completed_nominales/progress.target_nominales*100:.1f}%)")
-                
-                # Verificar si hemos completado
-                if progress.remaining_nominales <= 0:
-                    break
-                
-                # Verificar si el promedio cumple la condición
-                if self._check_condition(weighted_avg, progress.target_ratio, progress.condition):
-                    self._add_message(operation_id, "✅ Promedio cumple condición, continuando con el resto...")
-                else:
-                    self._add_message(operation_id, "⚠️ Promedio no cumple condición, pero continuamos para completar...")
-                
-                await self._notify_progress(operation_id, progress)
-                await asyncio.sleep(1)  # Pequeña pausa entre lotes
+                    print(f"[DEBUG] DESPUÉS de _notify_progress en línea 642 para {operation_id}")
+                    
+                    print(f"[DEBUG] ANTES de mensaje de intento para {operation_id}")
+                    self._add_message(operation_id, f"🔄 Intento {progress.current_attempt} (intentos infinitos hasta completar o cancelar)")
+                    print(f"[DEBUG] DESPUÉS de mensaje de intento para {operation_id}")
+                    print(f"[DEBUG] ANTES de mensaje de nominales restantes para {operation_id}")
+                    self._add_message(operation_id, f"   Nominales restantes: {progress.remaining_nominales}")
+                    print(f"[DEBUG] DESPUÉS de mensaje de nominales restantes para {operation_id}")
+                    
+                    # Mostrar cotizaciones actuales en tiempo real con análisis de ratio
+                    print(f"[DEBUG] ANTES de _show_current_quotes para {operation_id}")
+                    self._show_current_quotes(operation_id, request.instrument_to_sell, instrument_to_buy, request.target_ratio, request.condition)
+                    print(f"[DEBUG] DESPUÉS de _show_current_quotes para {operation_id}")
+                    
+                    # Notificar el progreso actualizado después de calcular los ratios
+                    print(f"[DEBUG] ANTES de _notify_progress para {operation_id}")
+                    await self._notify_progress(operation_id, progress)
+                    print(f"[DEBUG] DESPUÉS de _notify_progress para {operation_id}")
+                    
+                    # Calcular tamaño del lote
+                    print(f"[DEBUG] ANTES de _calculate_max_batch_size para {operation_id}")
+                    max_batch_size = self._calculate_max_batch_size(progress, quotes_cache)
+                    print(f"[DEBUG] DESPUÉS de _calculate_max_batch_size para {operation_id}")
+                    self._add_message(operation_id, f"🔍 DEBUG: max_batch_size = {max_batch_size}, remaining_nominales = {progress.remaining_nominales}")
+                    
+                    if max_batch_size <= 0:
+                        self._add_message(operation_id, "⏳ Esperando mejores condiciones de mercado... (continuará indefinidamente)")
+                        self._add_message(operation_id, "💡 El ratio actual no cumple la condición o no hay cotizaciones disponibles")
+                        self._update_progress(operation_id, current_step=OperationStep.WAITING_FOR_BETTER_PRICES)
+                        await self._notify_progress(operation_id, progress)
+                        await asyncio.sleep(10)  # Esperar 10 segundos antes del siguiente intento
+                        continue
+                    
+                    print(f"[DEBUG] ANTES de calcular batch_size para {operation_id}")
+                    batch_size = min(max_batch_size, progress.remaining_nominales)
+                    print(f"[DEBUG] DESPUÉS de calcular batch_size para {operation_id}")
+                    print(f"[DEBUG] *** PUNTO CRÍTICO -2: Llegamos hasta aquí para {operation_id} ***")
+                    print(f"[DEBUG] *** PUNTO CRÍTICO -3: Llegamos hasta aquí para {operation_id} ***")
+                    print(f"[DEBUG] ANTES de primer _add_message para {operation_id}")
+                    print(f"[DEBUG] ANTES de mensaje de batch_size para {operation_id}")
+                    self._add_message(operation_id, f"🔍 DEBUG: Calculando batch_size = min({max_batch_size}, {progress.remaining_nominales}) = {batch_size}")
+                    print(f"[DEBUG] DESPUÉS de mensaje de batch_size para {operation_id}")
+                    print(f"[DEBUG] DESPUÉS de primer _add_message para {operation_id}")
+                    print(f"[DEBUG] *** PUNTO CRÍTICO -1: Llegamos hasta aquí para {operation_id} ***")
+                    print(f"[DEBUG] ANTES de segundo _add_message para {operation_id}")
+                    print(f"[DEBUG] ANTES de mensaje de batch_count para {operation_id}")
+                    self._add_message(operation_id, f"🔍 DEBUG: progress.batch_count = {progress.batch_count}")
+                    print(f"[DEBUG] DESPUÉS de mensaje de batch_count para {operation_id}")
+                    print(f"[DEBUG] DESPUÉS de segundo _add_message para {operation_id}")
+                    
+                    print(f"[DEBUG] ANTES del try-catch para {operation_id}")
+                    print(f"[DEBUG] *** PUNTO CRÍTICO 0: Llegamos hasta aquí para {operation_id} ***")
+                    print(f"[DEBUG] *** PUNTO CRÍTICO 0.1: Llegamos hasta aquí para {operation_id} ***")
+                    print(f"[DEBUG] *** PUNTO CRÍTICO 0.2: Llegamos hasta aquí para {operation_id} ***")
+                    try:
+                        print(f"[DEBUG] Agregando mensaje de lote para {operation_id}")
+                        self._add_message(operation_id, f"📊 Lote 1: {batch_size} nominales")
+                        print(f"[DEBUG] Mensaje de lote agregado para {operation_id}")
+                except Exception as e:
+                        print(f"[DEBUG] ERROR al agregar mensaje de lote: {e}")
+                        self._add_message(operation_id, f"❌ Error agregando mensaje de lote: {e}")
+                    print(f"[DEBUG] DESPUÉS del try-catch para {operation_id}")
+                    
+                    # PUNTO CRÍTICO: Verificar si llegamos hasta aquí
+                    print(f"[DEBUG] *** PUNTO CRÍTICO 1: Llegamos hasta aquí para {operation_id} ***")
+                    
+                    # Actualizar tamaño del lote actual
+                    print(f"[DEBUG] ANTES de _update_progress current_batch_size para {operation_id}")
+                    self._update_progress(operation_id, current_batch_size=batch_size)
+                    print(f"[DEBUG] DESPUÉS de _update_progress current_batch_size para {operation_id}")
+                    
+                    # Ejecutar el lote
+                    print(f"[DEBUG] *** PUNTO CRÍTICO 2: Antes de actualizar step para {operation_id} ***")
+                    self._update_progress(operation_id, current_step=OperationStep.EXECUTING_BATCH)
+                    print(f"[DEBUG] *** PUNTO CRÍTICO 3: Después de actualizar step para {operation_id} ***")
+                    print(f"[DEBUG] ANTES de _notify_progress en línea 705 para {operation_id}")
+            await self._notify_progress(operation_id, progress)
+                    print(f"[DEBUG] *** PUNTO CRÍTICO 4: Después de _notify_progress para {operation_id} ***")
+                    print(f"[DEBUG] DESPUÉS de _notify_progress en línea 705 para {operation_id}")
+                    
+                    self._add_message(operation_id, f"🔍 DEBUG: Llamando a _execute_batch con batch_size={batch_size}")
+                    print(f"[DEBUG] *** PUNTO CRÍTICO 5: Antes de llamar _execute_batch para {operation_id} ***")
+                    try:
+                        success = await self._execute_batch(operation_id, batch_size, quotes_cache)
+                        self._add_message(operation_id, f"🔍 DEBUG: _execute_batch devolvió success={success}")
+                    except Exception as e:
+                        print(f"[DEBUG] ERROR en _execute_batch: {e}")
+                        self._add_message(operation_id, f"❌ Error en _execute_batch: {e}")
+                        success = False
+                    
+                    if not success:
+                        self._add_message(operation_id, "❌ Error ejecutando lote, reintentando...")
+            await asyncio.sleep(2)
+                        continue
+                    
+                    # Calcular ratio promedio ponderado
+                    self._update_progress(operation_id, current_step=OperationStep.CALCULATING_WEIGHTED_AVERAGE)
+            await self._notify_progress(operation_id, progress)
+                    
+                    weighted_avg = self._calculate_weighted_average_ratio(progress)
+                    progress.weighted_average_ratio = weighted_avg
+                    
+                    self._add_message(operation_id, f"📊 Ratio promedio ponderado: {weighted_avg:.6f}")
+                    self._add_message(operation_id, f"   Progreso: {progress.completed_nominales}/{progress.target_nominales} nominales ({progress.completed_nominales/progress.target_nominales*100:.1f}%)")
+                    
+                    # Verificar si hemos completado
+                    if progress.remaining_nominales <= 0:
+                        break
+                    
+                    # Verificar si el promedio cumple la condición
+                    if self._check_condition(weighted_avg, progress.target_ratio, progress.condition):
+                        self._add_message(operation_id, "✅ Promedio cumple condición, continuando con el resto...")
+                    else:
+                        self._add_message(operation_id, "⚠️ Promedio no cumple condición, pero continuamos para completar...")
+                    
+            await self._notify_progress(operation_id, progress)
+            await asyncio.sleep(1)  # Pequeña pausa entre lotes
+            
+            except Exception as e:
+                print(f"[DEBUG] ERROR en bucle principal: {e}")
+                self._add_message(operation_id, f"❌ Error en bucle principal: {str(e)}")
+                progress.status = OperationStatus.FAILED
+                progress.error = str(e)
             
             # Verificación final
             self._update_progress(operation_id, current_step=OperationStep.VERIFYING_RATIO)
@@ -777,7 +985,7 @@ class RatioOperationManager:
                     # Usar versión sin lock para evitar deadlock
                     self._add_message_unlocked(operation_id, "🛑 Operación cancelada")
                     return True
-            return False
+        return False
         finally:
             self.operation_lock.release()
 

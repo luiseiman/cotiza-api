@@ -907,7 +907,8 @@ async def websocket_endpoint(websocket: WebSocket):
                             }))
                     elif _cmd in ("start_ratio_operation", "ratio_operation"):
                         try:
-                            from ratio_operations import ratio_manager, RatioOperationRequest
+                            from ratio_operations import ratio_manager
+                            from ratio_operations_simple import simple_ratio_manager, RatioOperationRequest
                             import uuid
                             required_params = ["pair", "instrument_to_sell", "nominales", "target_ratio", "condition", "client_id"]
                             missing_params = [p for p in required_params if p not in message]
@@ -949,8 +950,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                     "error": progress.error,
                                     "timestamp": time.time()
                                 }))
-                            ratio_manager.register_callback(operation_id, progress_callback)
-                            asyncio.create_task(ratio_manager.execute_ratio_operation(request))
+                            simple_ratio_manager.register_callback(operation_id, progress_callback)
+                            asyncio.create_task(simple_ratio_manager.execute_ratio_operation_batch(request))
                             await websocket.send_text(json.dumps({
                                 "type": "ratio_operation_started",
                                 "operation_id": operation_id,
@@ -966,6 +967,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     elif _cmd in ("get_ratio_operation_status", "ratio_status"):
                         try:
                             from ratio_operations import ratio_manager
+                            from ratio_operations_simple import simple_ratio_manager
                             operation_id = message.get("operation_id")
                             if not operation_id:
                                 await websocket.send_text(json.dumps({
@@ -1012,6 +1014,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     elif _cmd in ("cancel_ratio_operation", "ratio_cancel"):
                         try:
                             from ratio_operations import ratio_manager
+                            from ratio_operations_simple import simple_ratio_manager
                             operation_id = message.get("operation_id")
                             if not operation_id:
                                 await websocket.send_text(json.dumps({
@@ -1036,6 +1039,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     elif _cmd in ("list_ratio_operations", "ratio_list"):
                         try:
                             from ratio_operations import ratio_manager
+                            from ratio_operations_simple import simple_ratio_manager
                             operations = ratio_manager.get_all_operations()
                             operations_data = []
                             for op in operations:
