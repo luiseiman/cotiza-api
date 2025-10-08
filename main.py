@@ -911,7 +911,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             from ratio_operations_simple import simple_ratio_manager, RatioOperationRequest
                             from ratio_operations_real import real_ratio_manager
                             import uuid
-                            required_params = ["pair", "instrument_to_sell", "nominales", "target_ratio", "condition", "client_id"]
+                            required_params = ["pair", "instrument_to_sell", "nominales", "target_ratio", "condition", "client_id", "operation_id"]
                             missing_params = [p for p in required_params if p not in message]
                             if missing_params:
                                 await websocket.send_text(json.dumps({
@@ -920,8 +920,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                     "timestamp": time.time()
                                 }))
                                 continue
-                            # Generar operation_id con formato: PAR1-PAR2_aleatorio
-                            operation_id = _generate_ratio_operation_id(message["pair"], message["instrument_to_sell"])
+                            # Usar operation_id proporcionado por el cliente
+                            operation_id = message["operation_id"]
                             request = RatioOperationRequest(
                                 pair=message["pair"],
                                 instrument_to_sell=message["instrument_to_sell"],
