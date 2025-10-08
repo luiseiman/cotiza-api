@@ -932,6 +932,9 @@ async def websocket_endpoint(websocket: WebSocket):
                                 operation_id=operation_id
                             )
                             async def progress_callback(progress):
+                                # Calcular nominales comprados sumando las cantidades de las órdenes de compra
+                                nominales_comprados = sum(order.quantity for order in progress.buy_orders)
+                                
                                 await websocket.send_text(json.dumps({
                                     "type": "ratio_operation_progress",
                                     "operation_id": progress.operation_id,
@@ -947,6 +950,9 @@ async def websocket_endpoint(websocket: WebSocket):
                                     "total_bought_amount": progress.total_bought_amount,
                                     "sell_orders_count": len(progress.sell_orders),
                                     "buy_orders_count": len(progress.buy_orders),
+                                    "nominales_objetivo": request.nominales,
+                                    "nominales_ejecutados": progress.completed_nominales,
+                                    "nominales_comprados": nominales_comprados,
                                     "messages": progress.messages[-10:],
                                     "error": progress.error,
                                     "timestamp": time.time()
