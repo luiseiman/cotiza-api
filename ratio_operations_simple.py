@@ -79,6 +79,7 @@ class RatioOperationRequest:
     target_ratio: float
     condition: str
     max_attempts: int = 0
+    buy_qty: float = 0.0  # Cantidad específica a comprar (0 = calcular automáticamente)
 
 class SimpleRatioOperationManager:
     def __init__(self):
