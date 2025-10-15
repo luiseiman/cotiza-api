@@ -88,6 +88,7 @@ class RatioOperationRequest:
     target_ratio: float
     condition: str
     max_attempts: int = 0
+    buy_qty: float = 0.0  # Cantidad específica a comprar (0 = calcular automáticamente)
 
 class RealRatioOperationManager:
     def __init__(self):
@@ -576,7 +577,12 @@ class RealRatioOperationManager:
             await asyncio.sleep(1)
             
             # PASO 2: Comprar instrumento complementario al precio de venta (offer)
-            buy_quantity = sell_order.quantity  # Usar cantidad efectivamente vendida
+            # Usar buy_qty si está especificado y es válido, sino usar cantidad vendida
+            if request.buy_qty > 0 and request.buy_qty <= sell_order.quantity:
+                buy_quantity = request.buy_qty
+                self._add_message(operation_id, f"🎯 LOTE #{lot_number} - Usando buy_qty específico: {buy_quantity}")
+            else:
+                buy_quantity = sell_order.quantity  # Usar cantidad efectivamente vendida
             
             if "TX26" in request.instrument_to_sell:
                 # ESTRATEGIA NORMAL - Comprar TX28

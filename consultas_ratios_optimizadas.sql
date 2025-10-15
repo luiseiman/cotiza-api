@@ -26,6 +26,18 @@ WITH params AS (
         'America/Argentina/Buenos_Aires'::text AS tz,
         (NOW() AT TIME ZONE 'America/Argentina/Buenos_Aires')::date AS today_local
 ),
+-- Normalizamos claves nulas para no perder filas
+base AS (
+    SELECT 
+        base_symbol,
+        quote_symbol,
+        COALESCE(user_id, 'default')   AS user_id,
+        COALESCE(client_id, 'default') AS client_id,
+        asof,
+        mid_ratio
+    FROM terminal_ratios_history
+    WHERE mid_ratio IS NOT NULL
+),
 prev_biz_date AS (
     SELECT 
         CASE 
@@ -37,16 +49,15 @@ prev_biz_date AS (
     FROM params
 ),
 ultimo_ratio AS (
-    -- Último ratio operado por cada par
+    -- Último ratio operado por cada par (usando mid_ratio como referencia principal)
     SELECT DISTINCT ON (base_symbol, quote_symbol, user_id, client_id)
         base_symbol,
         quote_symbol,
         user_id,
         client_id,
-        last_ratio as ultimo_ratio_operado,
+        mid_ratio as ultimo_ratio_operado,
         asof as ultimo_timestamp
-    FROM terminal_ratios_history
-    WHERE last_ratio IS NOT NULL
+    FROM base
     ORDER BY base_symbol, quote_symbol, user_id, client_id, asof DESC
 ),
 promedios AS (
@@ -60,7 +71,7 @@ promedios AS (
         -- RUEDA ANTERIOR (últimas 24 horas)
         AVG(CASE 
             WHEN asof > NOW() - INTERVAL '24 hours' 
-            THEN last_ratio 
+            THEN mid_ratio 
         END) as promedio_rueda,
         
         -- DÍA HÁBIL ANTERIOR (fecha de negocio previa en zona local)
@@ -68,40 +79,39 @@ promedios AS (
         COALESCE(
             AVG(CASE 
                 WHEN (asof AT TIME ZONE (SELECT tz FROM prev_biz_date))::date = (SELECT prev_date FROM prev_biz_date)
-                THEN last_ratio
+                THEN mid_ratio
             END),
             AVG(CASE 
                 WHEN asof > NOW() - INTERVAL '48 hours' AND asof <= NOW() - INTERVAL '24 hours'
-                THEN last_ratio 
+                THEN mid_ratio 
             END)
         ) as promedio_dia_anterior,
         
         -- 1 SEMANA
         AVG(CASE 
             WHEN asof > NOW() - INTERVAL '7 days' 
-            THEN last_ratio 
+            THEN mid_ratio 
         END) as promedio_1semana,
         
         -- 1 MES
         AVG(CASE 
             WHEN asof > NOW() - INTERVAL '30 days' 
-            THEN last_ratio 
+            THEN mid_ratio 
         END) as promedio_1mes,
         
         -- MÍNIMO MENSUAL
         MIN(CASE 
             WHEN asof > NOW() - INTERVAL '30 days' 
-            THEN last_ratio 
+            THEN mid_ratio 
         END) as minimo_mensual,
         
         -- MÁXIMO MENSUAL
         MAX(CASE 
             WHEN asof > NOW() - INTERVAL '30 days' 
-            THEN last_ratio 
+            THEN mid_ratio 
         END) as maximo_mensual
         
-    FROM terminal_ratios_history
-    WHERE last_ratio IS NOT NULL
+    FROM base
     GROUP BY base_symbol, quote_symbol, user_id, client_id
 )
 SELECT 
@@ -112,7 +122,7 @@ SELECT
     
     -- RUEDA ANTERIOR
     ROUND(p.promedio_rueda::numeric, 5) as promedio_rueda,
-    ROUND((((u.ultimo_ratio_operado - p.promedio_rueda) / p.promedio_rueda) * 100)::numeric, 2) as dif_rueda_pct,
+    ROUND((((u.ultimo_ratio_operado - p.promedio_rueda) / NULLIF(p.promedio_rueda,0)) * 100)::numeric, 2) as dif_rueda_pct,
     
     -- DÍA HÁBIL ANTERIOR
     ROUND(p.promedio_dia_anterior::numeric, 5) as promedio_dia_anterior,
@@ -124,19 +134,19 @@ SELECT
     
     -- 1 SEMANA
     ROUND(p.promedio_1semana::numeric, 5) as promedio_1semana,
-    ROUND((((u.ultimo_ratio_operado - p.promedio_1semana) / p.promedio_1semana) * 100)::numeric, 2) as dif_1semana_pct,
+    ROUND((((u.ultimo_ratio_operado - p.promedio_1semana) / NULLIF(p.promedio_1semana,0)) * 100)::numeric, 2) as dif_1semana_pct,
     
     -- 1 MES
     ROUND(p.promedio_1mes::numeric, 5) as promedio_1mes,
-    ROUND((((u.ultimo_ratio_operado - p.promedio_1mes) / p.promedio_1mes) * 100)::numeric, 2) as dif_1mes_pct,
+    ROUND((((u.ultimo_ratio_operado - p.promedio_1mes) / NULLIF(p.promedio_1mes,0)) * 100)::numeric, 2) as dif_1mes_pct,
     
     -- MÍNIMO MENSUAL
     ROUND(p.minimo_mensual::numeric, 5) as minimo_mensual,
-    ROUND((((u.ultimo_ratio_operado - p.minimo_mensual) / p.minimo_mensual) * 100)::numeric, 2) as dif_minimo_pct,
+    ROUND((((u.ultimo_ratio_operado - p.minimo_mensual) / NULLIF(p.minimo_mensual,0)) * 100)::numeric, 2) as dif_minimo_pct,
     
     -- MÁXIMO MENSUAL
     ROUND(p.maximo_mensual::numeric, 5) as maximo_mensual,
-    ROUND((((u.ultimo_ratio_operado - p.maximo_mensual) / p.maximo_mensual) * 100)::numeric, 2) as dif_maximo_pct
+    ROUND((((u.ultimo_ratio_operado - p.maximo_mensual) / NULLIF(p.maximo_mensual,0)) * 100)::numeric, 2) as dif_maximo_pct
     
 FROM promedios p
 JOIN ultimo_ratio u ON 

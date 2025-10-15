@@ -922,6 +922,10 @@ async def websocket_endpoint(websocket: WebSocket):
                                 continue
                             # Usar operation_id proporcionado por el cliente
                             operation_id = message["operation_id"]
+                            
+                            # Obtener buy_qty (opcional, default 0.0)
+                            buy_qty = float(message.get("buy_qty", 0.0))
+                            
                             request = RatioOperationRequest(
                                 pair=message["pair"],
                                 instrument_to_sell=message["instrument_to_sell"],
@@ -929,7 +933,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                 target_ratio=float(message["target_ratio"]),
                                 condition=message["condition"],
                                 client_id=message["client_id"],
-                                operation_id=operation_id
+                                operation_id=operation_id,
+                                buy_qty=buy_qty
                             )
                             async def progress_callback(progress):
                                 # Calcular nominales comprados sumando las cantidades de las órdenes de compra
@@ -953,6 +958,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                     "nominales_objetivo": request.nominales,
                                     "nominales_ejecutados": progress.completed_nominales,
                                     "nominales_comprados": nominales_comprados,
+                                    "buy_qty_solicitado": request.buy_qty,
+                                    "buy_qty_usado": request.buy_qty if request.buy_qty > 0 and request.buy_qty <= request.nominales else 0,
                                     "messages": progress.messages[-10:],
                                     "error": progress.error,
                                     "timestamp": time.time()
