@@ -238,3 +238,4 @@ async def test_operacion_completa():
 if __name__ == "__main__":
     asyncio.run(test_operacion_completa())
 
+

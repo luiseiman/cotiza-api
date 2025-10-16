@@ -189,3 +189,4 @@ async def test_estrategia_inversa():
 if __name__ == "__main__":
     asyncio.run(test_estrategia_inversa())
 
+

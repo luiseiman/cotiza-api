@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass
 from enum import Enum
 import asyncio
+import time
 import ws_rofex
 import ratios_worker
 
@@ -95,6 +96,8 @@ class RealRatioOperationManager:
         self.active_operations: Dict[str, OperationProgress] = {}
         self.callbacks: Dict[str, callable] = {}
         self.operation_lock = asyncio.Lock()
+        self.pending_orders_monitor: Dict[str, List[OrderExecution]] = {}  # operation_id -> pending orders
+        self.monitoring_tasks: Dict[str, asyncio.Task] = {}  # operation_id -> monitoring task
     
     def register_callback(self, operation_id: str, callback: callable):
         """Registra un callback para notificar progreso"""
@@ -325,12 +328,13 @@ class RealRatioOperationManager:
             self._add_message(operation_id, f"📤 Enviando orden {side.upper()} para {instrument}: {quantity} @ {price}")
             
             # Preparar parámetros para la orden
+            client_order_id = f"{operation_id}_{side}_{datetime.now().strftime('%H%M%S')}"
             order_params = {
                 "instrument": instrument,
                 "side": side,
                 "quantity": quantity,
                 "price": price,
-                "client_id": f"{operation_id}_{side}_{datetime.now().strftime('%H%M%S')}"
+                "client_id": client_order_id
             }
             
             print(f"[DEBUG] Parámetros de orden: {order_params}")
@@ -343,21 +347,27 @@ class RealRatioOperationManager:
                     size=quantity,
                     price=price,
                     order_type="LIMIT",
-                    client_order_id=order_params["client_id"]
+                    client_order_id=client_order_id
                 )
                 print(f"[DEBUG] Resultado de orden: {result}")
                 
                 if result and result.get('status') == 'ok':
+                    # La orden fue aceptada por el broker, pero no necesariamente ejecutada
                     order_execution = OrderExecution(
                         instrument=instrument,
                         quantity=quantity,
                         price=price,
-                        order_id=result.get('order_id', f"{operation_id}_{side}_{datetime.now().strftime('%H%M%S')}"),
+                        order_id=result.get('order_id', client_order_id),
                         timestamp=datetime.now().isoformat(),
                         side=side,
-                        status="filled"
+                        status="pending"  # Cambiar a "pending" - no asumir que está ejecutada
                     )
-                    self._add_message(operation_id, f"✅ Orden {side.upper()} ejecutada: {order_execution.order_id}")
+                    self._add_message(operation_id, f"✅ Orden {side.upper()} aceptada por broker: {order_execution.order_id}")
+                    
+                    # Esperar y verificar el estado real de la orden
+                    await asyncio.sleep(2)  # Esperar un poco para que llegue el order report
+                    real_status = await self._verify_order_status(operation_id, client_order_id, order_execution)
+                    
                     return order_execution
                 else:
                     error_msg = result.get('message', 'Error desconocido') if result else 'No se recibió respuesta'
@@ -377,6 +387,351 @@ class RealRatioOperationManager:
             self._add_message(operation_id, f"❌ Error ejecutando orden {side.upper()}: {str(e)}")
             print(f"[DEBUG] Error ejecutando orden: {e}")
             return None
+    
+    async def _verify_order_status(self, operation_id: str, client_order_id: str, order_execution: OrderExecution) -> str:
+        """Verifica el estado real de una orden consultando los order reports"""
+        try:
+            self._add_message(operation_id, f"🔍 Verificando estado real de orden: {client_order_id}")
+            
+            # Intentar múltiples veces para obtener el order report correcto
+            max_attempts = 5
+            for attempt in range(max_attempts):
+                if hasattr(ws_rofex, 'manager') and hasattr(ws_rofex.manager, 'last_order_report'):
+                    last_report = ws_rofex.manager.last_order_report()
+                    
+                    if last_report:
+                        # Buscar el client order ID en diferentes campos posibles
+                        report_client_id = (last_report.get("wsClOrdId") or 
+                                          last_report.get("clOrdId") or 
+                                          last_report.get("clientId") or 
+                                          last_report.get("client_order_id"))
+                        
+                        if report_client_id == client_order_id:
+                            order_status = last_report.get('status', 'UNKNOWN')
+                            self._add_message(operation_id, f"📊 Estado real de orden {client_order_id}: {order_status}")
+                            
+                            # Mapear estados del broker a estados internos
+                            if order_status in ['FILLED', 'PARTIALLY_FILLED']:
+                                order_execution.status = "filled"
+                                self._add_message(operation_id, f"✅ Orden {client_order_id} EJECUTADA en el mercado")
+                                return order_execution.status
+                            elif order_status in ['PENDING_NEW', 'NEW', 'PENDING_CANCEL']:
+                                order_execution.status = "pending"
+                                self._add_message(operation_id, f"⏳ Orden {client_order_id} PENDIENTE en el mercado")
+                                return order_execution.status
+                            elif order_status in ['CANCELLED', 'REJECTED']:
+                                order_execution.status = "rejected"
+                                self._add_message(operation_id, f"❌ Orden {client_order_id} RECHAZADA/CANCELADA")
+                                return order_execution.status
+                            else:
+                                order_execution.status = "unknown"
+                                self._add_message(operation_id, f"❓ Orden {client_order_id} estado desconocido: {order_status}")
+                                return order_execution.status
+                        else:
+                            if attempt < max_attempts - 1:
+                                self._add_message(operation_id, f"⏳ Esperando order report para {client_order_id}... (intento {attempt + 1}/{max_attempts})")
+                                await asyncio.sleep(1)  # Esperar un poco más
+                                continue
+                            else:
+                                self._add_message(operation_id, f"⚠️ Order report no coincide con {client_order_id} (encontrado: {report_client_id})")
+                    else:
+                        if attempt < max_attempts - 1:
+                            self._add_message(operation_id, f"⏳ Esperando order report... (intento {attempt + 1}/{max_attempts})")
+                            await asyncio.sleep(1)
+                            continue
+                        else:
+                            self._add_message(operation_id, f"⚠️ No hay order report disponible para verificar {client_order_id}")
+                else:
+                    self._add_message(operation_id, f"⚠️ No se puede verificar estado de orden - ws_rofex no disponible")
+                    break
+            
+            # Si no se puede verificar después de todos los intentos, mantener como pending
+            order_execution.status = "pending"
+            self._add_message(operation_id, f"⚠️ No se pudo verificar estado de {client_order_id} - asumiendo PENDIENTE")
+            return "pending"
+            
+        except Exception as e:
+            self._add_message(operation_id, f"❌ Error verificando estado de orden: {str(e)}")
+            order_execution.status = "pending"
+            return "pending"
+    
+    async def _verify_all_orders_status(self, operation_id: str, progress: OperationProgress):
+        """Verifica el estado de todas las órdenes de una operación"""
+        try:
+            self._add_message(operation_id, "🔄 Verificando estado de todas las órdenes...")
+            
+            # Verificar todas las órdenes de venta
+            for sell_order in progress.sell_orders:
+                if sell_order.status == "pending":
+                    # Extraer client_order_id del order_id
+                    client_order_id = sell_order.order_id
+                    await self._verify_order_status(operation_id, client_order_id, sell_order)
+            
+            # Verificar todas las órdenes de compra
+            for buy_order in progress.buy_orders:
+                if buy_order.status == "pending":
+                    # Extraer client_order_id del order_id
+                    client_order_id = buy_order.order_id
+                    await self._verify_order_status(operation_id, client_order_id, buy_order)
+            
+            # Contar órdenes por estado
+            filled_sell = len([o for o in progress.sell_orders if o.status == "filled"])
+            pending_sell = len([o for o in progress.sell_orders if o.status == "pending"])
+            filled_buy = len([o for o in progress.buy_orders if o.status == "filled"])
+            pending_buy = len([o for o in progress.buy_orders if o.status == "pending"])
+            
+            self._add_message(operation_id, f"📊 Estado de órdenes:")
+            self._add_message(operation_id, f"   ✅ Ventas ejecutadas: {filled_sell}, pendientes: {pending_sell}")
+            self._add_message(operation_id, f"   ✅ Compras ejecutadas: {filled_buy}, pendientes: {pending_buy}")
+            
+        except Exception as e:
+            self._add_message(operation_id, f"❌ Error verificando estado de órdenes: {str(e)}")
+    
+    async def _start_pending_orders_monitoring(self, operation_id: str, progress: OperationProgress):
+        """Inicia el monitoreo continuo de órdenes pendientes"""
+        try:
+            # Recopilar todas las órdenes pendientes
+            pending_orders = []
+            for sell_order in progress.sell_orders:
+                if sell_order.status == "pending":
+                    pending_orders.append(sell_order)
+            for buy_order in progress.buy_orders:
+                if buy_order.status == "pending":
+                    pending_orders.append(buy_order)
+            
+            if not pending_orders:
+                self._add_message(operation_id, "✅ No hay órdenes pendientes para monitorear")
+                return
+            
+            self.pending_orders_monitor[operation_id] = pending_orders
+            self._add_message(operation_id, f"🔍 Iniciando monitoreo continuo de {len(pending_orders)} órdenes pendientes")
+            
+            # Crear tarea de monitoreo
+            monitoring_task = asyncio.create_task(
+                self._monitor_pending_orders_loop(operation_id, progress)
+            )
+            self.monitoring_tasks[operation_id] = monitoring_task
+            
+        except Exception as e:
+            self._add_message(operation_id, f"❌ Error iniciando monitoreo: {str(e)}")
+    
+    async def _monitor_pending_orders_loop(self, operation_id: str, progress: OperationProgress):
+        """Loop de monitoreo continuo de órdenes pendientes"""
+        try:
+            max_monitoring_time = 1800  # 30 minutos máximo
+            check_interval = 10  # Verificar cada 10 segundos
+            start_time = time.time()
+            
+            self._add_message(operation_id, f"⏰ MONITOREO CONTINUO INICIADO")
+            self._add_message(operation_id, f"   🎯 Objetivo: Completar TODOS los nominales solicitados")
+            self._add_message(operation_id, f"   ⏱️ Duración máxima: {max_monitoring_time/60:.0f} minutos")
+            self._add_message(operation_id, f"   🔄 Verificación cada: {check_interval} segundos")
+            
+            while time.time() - start_time < max_monitoring_time:
+                try:
+                    # Verificar estado de órdenes pendientes
+                    pending_orders = self.pending_orders_monitor.get(operation_id, [])
+                    if not pending_orders:
+                        self._add_message(operation_id, "✅ Todas las órdenes han sido procesadas - deteniendo monitoreo")
+                        break
+                    
+                    # Verificar cada orden pendiente
+                    still_pending = []
+                    newly_filled = []
+                    
+                    for order in pending_orders:
+                        if order.status == "pending":
+                            # Verificar estado actual
+                            await self._verify_order_status(operation_id, order.order_id, order)
+                            
+                            if order.status == "filled":
+                                newly_filled.append(order)
+                                self._add_message(operation_id, f"🎉 ¡Orden {order.order_id} EJECUTADA durante el monitoreo!")
+                            else:
+                                still_pending.append(order)
+                    
+                    # Actualizar lista de órdenes pendientes
+                    self.pending_orders_monitor[operation_id] = still_pending
+                    
+                    if newly_filled:
+                        # Recalcular ratios y notificar progreso
+                        await self._recalculate_operation_progress(operation_id, progress)
+                        await self._notify_progress(operation_id, progress)
+                        
+                        # Verificar si necesitamos ejecutar más lotes para completar los nominales
+                        await self._check_and_execute_additional_lots(operation_id, progress, request)
+                    
+                    if not still_pending:
+                        # Verificar si realmente completamos todos los nominales
+                        if progress.completed_nominales >= request.nominales:
+                            self._add_message(operation_id, "🎉 ¡TODOS LOS NOMINALES EJECUTADOS! Operación completada")
+                            progress.status = OperationStatus.COMPLETED
+                            await self._notify_progress(operation_id, progress)
+                            break
+                        else:
+                            self._add_message(operation_id, f"⚠️ Órdenes ejecutadas pero faltan nominales: {progress.completed_nominales}/{request.nominales}")
+                            # Continuar monitoreo para ejecutar más lotes
+                    
+                    # Esperar antes del siguiente check
+                    await asyncio.sleep(check_interval)
+                    
+                except Exception as e:
+                    self._add_message(operation_id, f"❌ Error en monitoreo: {str(e)}")
+                    await asyncio.sleep(check_interval)
+            
+            # Limpiar monitoreo
+            if operation_id in self.pending_orders_monitor:
+                remaining_pending = len(self.pending_orders_monitor[operation_id])
+                if remaining_pending > 0:
+                    self._add_message(operation_id, f"⏰ Monitoreo finalizado - {remaining_pending} órdenes aún pendientes")
+                del self.pending_orders_monitor[operation_id]
+            
+            if operation_id in self.monitoring_tasks:
+                del self.monitoring_tasks[operation_id]
+                
+        except Exception as e:
+            self._add_message(operation_id, f"❌ Error en loop de monitoreo: {str(e)}")
+    
+    async def _recalculate_operation_progress(self, operation_id: str, progress: OperationProgress):
+        """Recalcula el progreso de la operación basado en órdenes ejecutadas"""
+        try:
+            # Recalcular totales solo con órdenes ejecutadas
+            executed_sell_orders = [o for o in progress.sell_orders if o.status == "filled"]
+            executed_buy_orders = [o for o in progress.buy_orders if o.status == "filled"]
+            
+            if executed_sell_orders:
+                progress.total_sold_amount = sum(order.quantity * order.price for order in executed_sell_orders)
+                progress.average_sell_price = progress.total_sold_amount / sum(order.quantity for order in executed_sell_orders)
+            
+            if executed_buy_orders:
+                progress.total_bought_amount = sum(order.quantity * order.price for order in executed_buy_orders)
+                progress.average_buy_price = progress.total_bought_amount / sum(order.quantity for order in executed_buy_orders)
+                progress.completed_nominales = sum(order.quantity for order in executed_buy_orders)
+            
+            # Recalcular ratio ponderado
+            if progress.total_bought_amount > 0:
+                progress.weighted_average_ratio = progress.total_sold_amount / progress.total_bought_amount
+                progress.condition_met = self._check_condition(
+                    progress.weighted_average_ratio, 
+                    progress.target_ratio, 
+                    progress.condition
+                )
+            
+            self._add_message(operation_id, f"📊 Progreso recalculado:")
+            self._add_message(operation_id, f"   ✅ Órdenes ejecutadas: {len(executed_sell_orders)} ventas, {len(executed_buy_orders)} compras")
+            self._add_message(operation_id, f"   📈 Ratio actual: {progress.weighted_average_ratio:.6f}")
+            self._add_message(operation_id, f"   💰 Nominales ejecutados: {progress.completed_nominales}")
+            
+        except Exception as e:
+            self._add_message(operation_id, f"❌ Error recalculando progreso: {str(e)}")
+    
+    async def _check_and_execute_additional_lots(self, operation_id: str, progress: OperationProgress, request: RatioOperationRequest):
+        """Verifica si necesitamos ejecutar lotes adicionales para completar los nominales"""
+        try:
+            # Calcular nominales restantes
+            remaining_nominales = request.nominales - progress.completed_nominales
+            
+            if remaining_nominales <= 0:
+                return  # Ya completamos todos los nominales
+            
+            # Obtener cotizaciones actuales
+            instruments = [request.instrument_to_sell]
+            if len(request.pair) > 1:
+                for instrument in request.pair:
+                    if instrument != request.instrument_to_sell:
+                        instruments.append(instrument)
+                        break
+            
+            quotes = self._get_real_quotes(instruments)
+            if not quotes:
+                self._add_message(operation_id, "⚠️ No se pueden obtener cotizaciones para lotes adicionales")
+                return
+            
+            sell_quotes = quotes.get(request.instrument_to_sell, {})
+            buy_instrument = instruments[1] if len(instruments) > 1 else request.pair[1] if len(request.pair) > 1 else "MERV - XMEV - TX28 - 24hs"
+            buy_quotes = quotes.get(buy_instrument, {})
+            
+            # Calcular tamaño de lote adicional
+            lot_size = self._calculate_lot_size(sell_quotes, buy_quotes, remaining_nominales)
+            
+            if lot_size <= 0:
+                self._add_message(operation_id, f"⚠️ Sin liquidez para lote adicional - nominales restantes: {remaining_nominales}")
+                return
+            
+            self._add_message(operation_id, f"🔄 EJECUTANDO LOTE ADICIONAL: {lot_size} nominales (restantes: {remaining_nominales})")
+            
+            # Ejecutar lote adicional
+            await self._execute_additional_lot(operation_id, request, sell_quotes, buy_quotes, lot_size, buy_instrument)
+            
+        except Exception as e:
+            self._add_message(operation_id, f"❌ Error ejecutando lote adicional: {str(e)}")
+    
+    async def _execute_additional_lot(self, operation_id: str, request: RatioOperationRequest, sell_quotes: Dict, buy_quotes: Dict, lot_size: float, buy_instrument: str):
+        """Ejecuta un lote adicional para completar los nominales"""
+        try:
+            # PASO 1: Vender instrumento
+            if "TX26" in request.instrument_to_sell:
+                sell_price = sell_quotes.get('bid', 0)
+                self._add_message(operation_id, f"📤 LOTE ADICIONAL - Vendiendo TX26 @ {sell_price}")
+            elif "TX28" in request.instrument_to_sell:
+                sell_price = buy_quotes.get('bid', 0)
+                self._add_message(operation_id, f"📤 LOTE ADICIONAL - Vendiendo TX28 @ {sell_price}")
+            else:
+                return
+            
+            sell_order = await self._execute_real_order(
+                operation_id, 
+                request.instrument_to_sell, 
+                "sell", 
+                lot_size, 
+                sell_price
+            )
+            
+            if not sell_order:
+                self._add_message(operation_id, f"❌ Error en venta del lote adicional")
+                return
+            
+            # Agregar a órdenes de venta
+            if operation_id in self.active_operations:
+                self.active_operations[operation_id].sell_orders.append(sell_order)
+            
+            # Esperar un poco
+            await asyncio.sleep(1)
+            
+            # PASO 2: Comprar instrumento complementario
+            if "TX26" in request.instrument_to_sell:
+                buy_price = buy_quotes.get('offer', 0)
+                self._add_message(operation_id, f"📥 LOTE ADICIONAL - Comprando TX28 @ {buy_price}")
+            elif "TX28" in request.instrument_to_sell:
+                buy_price = sell_quotes.get('offer', 0)
+                self._add_message(operation_id, f"📥 LOTE ADICIONAL - Comprando TX26 @ {buy_price}")
+            else:
+                return
+            
+            buy_order = await self._execute_real_order(
+                operation_id, 
+                buy_instrument, 
+                "buy", 
+                lot_size, 
+                buy_price
+            )
+            
+            if not buy_order:
+                self._add_message(operation_id, f"❌ Error en compra del lote adicional")
+                return
+            
+            # Agregar a órdenes de compra
+            if operation_id in self.active_operations:
+                self.active_operations[operation_id].buy_orders.append(buy_order)
+            
+            # Agregar a monitoreo de órdenes pendientes
+            if operation_id in self.pending_orders_monitor:
+                self.pending_orders_monitor[operation_id].extend([sell_order, buy_order])
+            
+            self._add_message(operation_id, f"✅ LOTE ADICIONAL EJECUTADO: {sell_order.order_id}, {buy_order.order_id}")
+            
+        except Exception as e:
+            self._add_message(operation_id, f"❌ Error ejecutando lote adicional: {str(e)}")
     
     async def execute_ratio_operation_batch(self, request: RatioOperationRequest) -> OperationProgress:
         """Ejecuta una operación de ratio con órdenes reales"""
@@ -654,32 +1009,78 @@ class RealRatioOperationManager:
             self._add_message(operation_id, f"⏳ Esperando 3 segundos antes del siguiente lote...")
             await asyncio.sleep(3)
         
-        # Finalizar operación
-        if progress.remaining_nominales <= 0:
+        # Verificar estado real de todas las órdenes antes de finalizar
+        self._add_message(operation_id, "🔍 VERIFICANDO ESTADO REAL DE TODAS LAS ÓRDENES...")
+        
+        # Verificar estado de todas las órdenes una vez más
+        await self._verify_all_orders_status(operation_id, progress)
+        
+        all_orders_filled = True
+        pending_orders = []
+        
+        # Verificar órdenes de venta
+        for sell_order in progress.sell_orders:
+            if sell_order.status != "filled":
+                all_orders_filled = False
+                pending_orders.append(f"Venta {sell_order.order_id}: {sell_order.status}")
+        
+        # Verificar órdenes de compra
+        for buy_order in progress.buy_orders:
+            if buy_order.status != "filled":
+                all_orders_filled = False
+                pending_orders.append(f"Compra {buy_order.order_id}: {buy_order.status}")
+        
+        # Determinar estado final basado en órdenes realmente ejecutadas
+        if all_orders_filled and progress.remaining_nominales <= 0:
             progress.status = OperationStatus.COMPLETED
-            self._add_message(operation_id, "✅ OPERACIÓN COMPLETADA EXITOSAMENTE")
+            self._add_message(operation_id, "✅ OPERACIÓN COMPLETADA EXITOSAMENTE - TODAS LAS ÓRDENES EJECUTADAS")
         else:
-            progress.status = OperationStatus.PARTIALLY_COMPLETED
-            self._add_message(operation_id, f"⚠️ OPERACIÓN PARCIALMENTE COMPLETADA: {progress.completed_nominales}/{request.nominales}")
+            # Hay órdenes pendientes - iniciar monitoreo continuo
+            progress.status = OperationStatus.RUNNING  # Mantener como RUNNING hasta completar
+            self._add_message(operation_id, f"🔍 ÓRDENES PENDIENTES DETECTADAS - INICIANDO MONITOREO CONTINUO")
+            if pending_orders:
+                self._add_message(operation_id, f"   ⏳ Órdenes pendientes:")
+                for pending in pending_orders:
+                    self._add_message(operation_id, f"      {pending}")
+            
+            # Iniciar monitoreo continuo de órdenes pendientes
+            await self._start_pending_orders_monitoring(operation_id, progress)
         
         progress.current_step = OperationStep.FINALIZING
         progress.progress_percentage = 100
         
-        # Ratio final de toda la operación
-        if progress.total_bought_amount > 0:
-            final_ratio = progress.total_sold_amount / progress.total_bought_amount
-            progress.weighted_average_ratio = final_ratio
-            progress.condition_met = self._check_condition(final_ratio, request.target_ratio, request.condition)
+        # Ratio final de toda la operación (solo órdenes ejecutadas)
+        executed_sell_orders = [o for o in progress.sell_orders if o.status == "filled"]
+        executed_buy_orders = [o for o in progress.buy_orders if o.status == "filled"]
+        
+        if executed_buy_orders and executed_sell_orders:
+            total_executed_sold = sum(order.quantity * order.price for order in executed_sell_orders)
+            total_executed_bought = sum(order.quantity * order.price for order in executed_buy_orders)
             
-            self._add_message(operation_id, f"📊 RESUMEN FINAL:")
-            self._add_message(operation_id, f"   🎯 Nominales objetivo: {request.nominales}")
-            self._add_message(operation_id, f"   ✅ Nominales ejecutados: {progress.completed_nominales}")
-            self._add_message(operation_id, f"   📈 Ratio final ponderado: {final_ratio:.6f}")
-            self._add_message(operation_id, f"   🎯 Condición cumplida: {progress.condition_met}")
-            self._add_message(operation_id, f"   📦 Lotes ejecutados: {progress.batch_count}")
+            if total_executed_bought > 0:
+                final_ratio = total_executed_sold / total_executed_bought
+                progress.weighted_average_ratio = final_ratio
+                progress.condition_met = self._check_condition(final_ratio, request.target_ratio, request.condition)
+                
+                self._add_message(operation_id, f"📊 RESUMEN FINAL:")
+                self._add_message(operation_id, f"   🎯 Nominales objetivo: {request.nominales}")
+                self._add_message(operation_id, f"   ✅ Nominales ejecutados: {progress.completed_nominales}")
+                self._add_message(operation_id, f"   📈 Ratio final ponderado: {final_ratio:.6f}")
+                self._add_message(operation_id, f"   🎯 Condición cumplida: {progress.condition_met}")
+                self._add_message(operation_id, f"   📦 Lotes ejecutados: {progress.batch_count}")
+                self._add_message(operation_id, f"   ✅ Órdenes ejecutadas: {len(executed_sell_orders)} ventas, {len(executed_buy_orders)} compras")
+                if pending_orders:
+                    self._add_message(operation_id, f"   ⏳ Órdenes pendientes: {len(pending_orders)}")
         
         # Notificar progreso final
         await self._notify_progress(operation_id, progress)
+        
+        # Si hay órdenes pendientes, iniciar monitoreo continuo
+        if pending_orders:
+            self._add_message(operation_id, "🔄 Iniciando monitoreo continuo de órdenes pendientes...")
+            await self._start_pending_orders_monitoring(operation_id, progress)
+        else:
+            self._add_message(operation_id, "✅ Todas las órdenes ejecutadas - no se requiere monitoreo")
         
         print(f"[DEBUG] Operación {operation_id} completada: {progress.completed_nominales}/{request.nominales} nominales")
         return progress
