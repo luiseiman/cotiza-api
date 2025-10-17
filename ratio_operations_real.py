@@ -296,30 +296,125 @@ class RealRatioOperationManager:
             print(f"[DEBUG] Error en optimización: {e}")
             return False, f"Error en optimización: {e}"
     
-    def _calculate_lot_size(self, sell_quotes: Dict, buy_quotes: Dict, remaining_nominales: float) -> float:
-        """Calcula el tamaño de lote basado en la liquidez disponible"""
+    def _calculate_lot_size(self, sell_quotes: Dict, buy_quotes: Dict, remaining_nominales: float, operation_id: str = "") -> float:
+        """Calcula el tamaño de lote basado en la liquidez disponible con factor de seguridad"""
         try:
             # Obtener liquidez disponible
             sell_liquidity = sell_quotes.get('bid_size', 0)    # Liquidez en bid TX26 (cantidad disponible para vender)
             buy_liquidity = buy_quotes.get('offer_size', 0)    # Liquidez en offer TX28 (cantidad disponible para comprar)
             
-            print(f"[DEBUG] Liquidez disponible:")
-            print(f"   Bid TX26 (vender): {sell_liquidity} nominales")
-            print(f"   Offer TX28 (comprar): {buy_liquidity} nominales")
+            self._add_message(operation_id, f"📊 Liquidez disponible:")
+            self._add_message(operation_id, f"   📈 TX26 (vender): {sell_liquidity} nominales")
+            self._add_message(operation_id, f"   📉 TX28 (comprar): {buy_liquidity} nominales")
             
             if sell_liquidity <= 0 or buy_liquidity <= 0:
-                print(f"[DEBUG] Sin liquidez suficiente - sell: {sell_liquidity}, buy: {buy_liquidity}")
+                self._add_message(operation_id, f"⚠️ Sin liquidez suficiente - TX26: {sell_liquidity}, TX28: {buy_liquidity}")
                 return 0.0
             
             # Calcular lote basado en la menor liquidez disponible
             available_liquidity = min(sell_liquidity, buy_liquidity)
-            lot_size = min(available_liquidity, remaining_nominales)
             
-            print(f"[DEBUG] Lote calculado: min({available_liquidity}, {remaining_nominales}) = {lot_size}")
+            # Aplicar factor de seguridad (80% de la liquidez disponible)
+            safety_factor = 0.8
+            safe_lot_size = available_liquidity * safety_factor
+            
+            # Verificar si la liquidez es muy baja comparada con lo restante
+            if available_liquidity < remaining_nominales * 0.1:  # Menos del 10% de lo restante
+                self._add_message(operation_id, f"⚠️ Liquidez muy baja: {available_liquidity} vs {remaining_nominales} restantes")
+            
+            # Lote final = min(liquidez_segura, nominales_restantes)
+            lot_size = min(safe_lot_size, remaining_nominales)
+            
+            self._add_message(operation_id, f"📊 Lote calculado:")
+            self._add_message(operation_id, f"   🎯 Liquidez disponible: {available_liquidity}")
+            self._add_message(operation_id, f"   🛡️ Factor de seguridad: {safety_factor*100}%")
+            self._add_message(operation_id, f"   📦 Lote seguro: {safe_lot_size:.0f}")
+            self._add_message(operation_id, f"   ✅ Lote final: {lot_size:.0f}")
+            
             return lot_size
             
         except Exception as e:
-            print(f"[DEBUG] Error calculando tamaño de lote: {e}")
+            self._add_message(operation_id, f"❌ Error calculando tamaño de lote: {e}")
+            return 0.0
+    
+    def _get_current_liquidity(self, instrument: str, side: str) -> float:
+        """Obtiene la liquidez actual de un instrumento en tiempo real"""
+        try:
+            # Obtener cotizaciones actuales
+            market_data = ratios_worker.obtener_datos_mercado(instrument)
+            if not market_data:
+                return 0.0
+            
+            if side.lower() == "sell":
+                # Para venta, necesitamos liquidez en bid (donde vendemos)
+                return float(market_data.get('bid_size', 0))
+            else:
+                # Para compra, necesitamos liquidez en offer (donde compramos)
+                return float(market_data.get('offer_size', 0))
+                
+        except Exception as e:
+            print(f"[DEBUG] Error obteniendo liquidez actual: {e}")
+            return 0.0
+    
+    async def _execute_real_order_with_liquidity_check(self, operation_id: str, instrument: str, side: str, quantity: float, price: float) -> Optional[OrderExecution]:
+        """Ejecuta orden con verificación de liquidez en tiempo real"""
+        try:
+            # Verificar liquidez actual ANTES de enviar la orden
+            current_liquidity = self._get_current_liquidity(instrument, side)
+            
+            self._add_message(operation_id, f"🔍 Verificando liquidez actual para {side.upper()} {instrument}:")
+            self._add_message(operation_id, f"   📊 Liquidez disponible: {current_liquidity}")
+            self._add_message(operation_id, f"   📦 Cantidad solicitada: {quantity}")
+            
+            if current_liquidity < quantity:
+                # Ajustar cantidad a la liquidez disponible
+                adjusted_quantity = current_liquidity
+                self._add_message(operation_id, f"⚠️ Liquidez insuficiente: {quantity} → {adjusted_quantity}")
+                
+                if adjusted_quantity <= 0:
+                    self._add_message(operation_id, f"❌ Sin liquidez disponible para {side.upper()} {instrument}")
+                    return None
+                
+                # Ejecutar orden con cantidad ajustada
+                return await self._execute_real_order(operation_id, instrument, side, adjusted_quantity, price)
+            else:
+                # Liquidez suficiente, ejecutar orden normal
+                return await self._execute_real_order(operation_id, instrument, side, quantity, price)
+                
+        except Exception as e:
+            self._add_message(operation_id, f"❌ Error verificando liquidez: {str(e)}")
+            return await self._execute_real_order(operation_id, instrument, side, quantity, price)
+    
+    async def _handle_partial_execution(self, operation_id: str, expected_quantity: float, actual_quantity: float, instrument: str, side: str) -> float:
+        """Maneja ejecuciones parciales cuando la liquidez es insuficiente"""
+        try:
+            if actual_quantity < expected_quantity:
+                self._add_message(operation_id, f"⚠️ Ejecución parcial en {side.upper()} {instrument}:")
+                self._add_message(operation_id, f"   📦 Solicitado: {expected_quantity}")
+                self._add_message(operation_id, f"   ✅ Ejecutado: {actual_quantity}")
+                
+                # Calcular cantidad faltante
+                remaining_quantity = expected_quantity - actual_quantity
+                self._add_message(operation_id, f"   ⚠️ Faltante: {remaining_quantity}")
+                
+                # Verificar si hay más liquidez disponible
+                current_liquidity = self._get_current_liquidity(instrument, side)
+                if current_liquidity > 0:
+                    self._add_message(operation_id, f"   🔍 Liquidez restante: {current_liquidity}")
+                    if current_liquidity >= remaining_quantity:
+                        self._add_message(operation_id, f"   🔄 Intentando completar con liquidez restante")
+                        return remaining_quantity
+                    else:
+                        self._add_message(operation_id, f"   ⚠️ Liquidez insuficiente para completar")
+                        return 0.0
+                else:
+                    self._add_message(operation_id, f"   ❌ Sin liquidez restante")
+                    return 0.0
+            
+            return 0.0  # No hay ejecución parcial
+            
+        except Exception as e:
+            self._add_message(operation_id, f"❌ Error manejando ejecución parcial: {str(e)}")
             return 0.0
     
     async def _execute_real_order(self, operation_id: str, instrument: str, side: str, quantity: float, price: float) -> Optional[OrderExecution]:
@@ -651,8 +746,8 @@ class RealRatioOperationManager:
             buy_instrument = instruments[1] if len(instruments) > 1 else request.pair[1] if len(request.pair) > 1 else "MERV - XMEV - TX28 - 24hs"
             buy_quotes = quotes.get(buy_instrument, {})
             
-            # Calcular tamaño de lote adicional
-            lot_size = self._calculate_lot_size(sell_quotes, buy_quotes, remaining_nominales)
+            # Calcular tamaño de lote adicional con factor de seguridad
+            lot_size = self._calculate_lot_size(sell_quotes, buy_quotes, remaining_nominales, operation_id)
             
             if lot_size <= 0:
                 self._add_message(operation_id, f"⚠️ Sin liquidez para lote adicional - nominales restantes: {remaining_nominales}")
@@ -679,7 +774,7 @@ class RealRatioOperationManager:
             else:
                 return
             
-            sell_order = await self._execute_real_order(
+            sell_order = await self._execute_real_order_with_liquidity_check(
                 operation_id, 
                 request.instrument_to_sell, 
                 "sell", 
@@ -708,7 +803,7 @@ class RealRatioOperationManager:
             else:
                 return
             
-            buy_order = await self._execute_real_order(
+            buy_order = await self._execute_real_order_with_liquidity_check(
                 operation_id, 
                 buy_instrument, 
                 "buy", 
@@ -840,8 +935,8 @@ class RealRatioOperationManager:
             sell_quotes = quotes.get(request.instrument_to_sell, {})
             buy_quotes = quotes.get(buy_instrument, {})
             
-            # Calcular tamaño de lote basado en liquidez disponible
-            lot_size = self._calculate_lot_size(sell_quotes, buy_quotes, progress.remaining_nominales)
+            # Calcular tamaño de lote basado en liquidez disponible con factor de seguridad
+            lot_size = self._calculate_lot_size(sell_quotes, buy_quotes, progress.remaining_nominales, operation_id)
             
             if lot_size <= 0:
                 self._add_message(operation_id, "⚠️ Sin liquidez suficiente para continuar")
@@ -904,7 +999,7 @@ class RealRatioOperationManager:
                 progress.status = OperationStatus.FAILED
                 break
             
-            sell_order = await self._execute_real_order(
+            sell_order = await self._execute_real_order_with_liquidity_check(
                 operation_id, 
                 request.instrument_to_sell, 
                 "sell", 
@@ -954,7 +1049,7 @@ class RealRatioOperationManager:
                 progress.status = OperationStatus.FAILED
                 break
             
-            buy_order = await self._execute_real_order(
+            buy_order = await self._execute_real_order_with_liquidity_check(
                 operation_id, 
                 buy_instrument, 
                 "buy", 
