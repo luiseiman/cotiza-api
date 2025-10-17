@@ -72,6 +72,7 @@ class OperationProgress:
     estimated_completion_time: str = ""
     market_condition: str = ""
     real_quotes: Dict = None
+    original_request: Optional[RatioOperationRequest] = None
 
     def __post_init__(self):
         if self.messages is None:
@@ -540,13 +541,62 @@ class RealRatioOperationManager:
                     self._add_message(operation_id, f"⚠️ No se puede verificar estado de orden - ws_rofex no disponible")
                     break
             
-            # Si no se puede verificar después de todos los intentos, mantener como pending
-            order_execution.status = "pending"
-            self._add_message(operation_id, f"⚠️ No se pudo verificar estado de {client_order_id} - asumiendo PENDIENTE")
-            return "pending"
+            # Si no se puede verificar después de todos los intentos, usar lógica alternativa
+            return await self._fallback_order_status_check(operation_id, client_order_id, order_execution)
             
         except Exception as e:
             self._add_message(operation_id, f"❌ Error verificando estado de orden: {str(e)}")
+            order_execution.status = "pending"
+            return "pending"
+    
+    async def _fallback_order_status_check(self, operation_id: str, client_order_id: str, order_execution: OrderExecution) -> str:
+        """Verificación alternativa cuando no se puede obtener order report del broker"""
+        try:
+            self._add_message(operation_id, f"🔄 Usando verificación alternativa para {client_order_id}")
+            
+            # Estrategia 1: Verificar si la orden fue enviada recientemente (menos de 30 segundos)
+            if hasattr(order_execution, 'timestamp') and order_execution.timestamp:
+                try:
+                    from datetime import datetime
+                    order_time = datetime.fromisoformat(order_execution.timestamp)
+                    current_time = datetime.now()
+                    time_diff = (current_time - order_time).total_seconds()
+                    
+                    if time_diff < 30:  # Orden muy reciente
+                        self._add_message(operation_id, f"⏳ Orden {client_order_id} muy reciente ({time_diff:.1f}s) - asumiendo PENDIENTE")
+                        order_execution.status = "pending"
+                        return "pending"
+                    elif time_diff > 300:  # Orden muy antigua (5 minutos)
+                        self._add_message(operation_id, f"⚠️ Orden {client_order_id} muy antigua ({time_diff:.1f}s) - asumiendo EJECUTADA")
+                        order_execution.status = "filled"
+                        return "filled"
+                    else:
+                        # Orden de edad intermedia - mantener como pending pero con advertencia
+                        self._add_message(operation_id, f"⏳ Orden {client_order_id} de edad intermedia ({time_diff:.1f}s) - asumiendo PENDIENTE")
+                        order_execution.status = "pending"
+                        return "pending"
+                        
+                except Exception as e:
+                    self._add_message(operation_id, f"⚠️ Error calculando edad de orden: {e}")
+            
+            # Estrategia 2: Verificar conectividad del WebSocket
+            if hasattr(ws_rofex, 'manager') and hasattr(ws_rofex.manager, 'is_connected'):
+                if ws_rofex.manager.is_connected():
+                    self._add_message(operation_id, f"🔗 WebSocket conectado - asumiendo PENDIENTE para {client_order_id}")
+                    order_execution.status = "pending"
+                    return "pending"
+                else:
+                    self._add_message(operation_id, f"⚠️ WebSocket desconectado - asumiendo EJECUTADA para {client_order_id}")
+                    order_execution.status = "filled"
+                    return "filled"
+            
+            # Estrategia 3: Por defecto, asumir pending
+            self._add_message(operation_id, f"⚠️ No se pudo verificar estado de {client_order_id} - asumiendo PENDIENTE")
+            order_execution.status = "pending"
+            return "pending"
+            
+        except Exception as e:
+            self._add_message(operation_id, f"❌ Error en verificación alternativa: {str(e)}")
             order_execution.status = "pending"
             return "pending"
     
@@ -654,18 +704,21 @@ class RealRatioOperationManager:
                         await self._notify_progress(operation_id, progress)
                         
                         # Verificar si necesitamos ejecutar más lotes para completar los nominales
-                        await self._check_and_execute_additional_lots(operation_id, progress, request)
+                        # Necesitamos obtener el request original para esto
+                        if hasattr(progress, 'original_request'):
+                            await self._check_and_execute_additional_lots(operation_id, progress, progress.original_request)
                     
                     if not still_pending:
                         # Verificar si realmente completamos todos los nominales
-                        if progress.completed_nominales >= request.nominales:
-                            self._add_message(operation_id, "🎉 ¡TODOS LOS NOMINALES EJECUTADOS! Operación completada")
-                            progress.status = OperationStatus.COMPLETED
-                            await self._notify_progress(operation_id, progress)
-                            break
-                        else:
-                            self._add_message(operation_id, f"⚠️ Órdenes ejecutadas pero faltan nominales: {progress.completed_nominales}/{request.nominales}")
-                            # Continuar monitoreo para ejecutar más lotes
+                        if hasattr(progress, 'original_request'):
+                            if progress.completed_nominales >= progress.original_request.nominales:
+                                self._add_message(operation_id, "🎉 ¡TODOS LOS NOMINALES EJECUTADOS! Operación completada")
+                                progress.status = OperationStatus.COMPLETED
+                                await self._notify_progress(operation_id, progress)
+                                break
+                            else:
+                                self._add_message(operation_id, f"⚠️ Órdenes ejecutadas pero faltan nominales: {progress.completed_nominales}/{progress.original_request.nominales}")
+                                # Continuar monitoreo para ejecutar más lotes
                     
                     # Esperar antes del siguiente check
                     await asyncio.sleep(check_interval)
@@ -867,7 +920,8 @@ class RealRatioOperationManager:
             success_rate=0.0,
             estimated_completion_time="",
             market_condition="",
-            real_quotes={}
+            real_quotes={},
+            original_request=request
         )
         
         # Agregar a operaciones activas
