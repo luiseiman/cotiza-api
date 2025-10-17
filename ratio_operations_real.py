@@ -3,8 +3,10 @@
 Versión mejorada del sistema de operaciones de ratio que ejecuta órdenes reales
 """
 
+from __future__ import annotations
+
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, TYPE_CHECKING
 from dataclasses import dataclass
 from enum import Enum
 import asyncio
